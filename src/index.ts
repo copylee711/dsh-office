@@ -26,11 +26,31 @@ export const inject = ['tools', 'attachments']
 export const STATUS_ROUTE = '/api/dsh-office/status'
 
 export interface Config {
+  follow?: boolean
+  typing?: boolean
+  card?: boolean
+  finalCheck?: boolean
   showOnOpen?: boolean
   renderWidth?: number
 }
 
 export const Config: z<Config> = z.object({
+  follow: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: '跟随 AI 正在修改的位置（自动滚动到那里）；关闭为静默执行，不动你的视图' },
+    'en-US': { $description: 'Scroll to where the AI is editing; off = silent, your view is left alone' },
+  }),
+  typing: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: '文字像打字一样逐步写出，而不是整块出现（每段最多约 1 秒）' },
+    'en-US': { $description: 'Write text progressively like typing instead of all at once (about a second per paragraph at most)' },
+  }),
+  card: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: 'AI 编辑时在屏幕右下角显示迷你卡片，可随时开关“跟随”和“逐字”' },
+    'en-US': { $description: 'Show a small card at the bottom right while the AI edits, with switches for following and typing' },
+  }),
+  finalCheck: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: '交付前整体视觉检查：保存时如果 AI 改完后还没看过成品，自动把各页渲染成图片给它检查' },
+    'en-US': { $description: 'Whole-document visual check: on save, show the AI every page if it has not looked since its last edits' },
+  }),
   showOnOpen: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '打开文档时把它的窗口带到前台' },
     'en-US': { $description: 'Bring the document window to the front when it is opened' },

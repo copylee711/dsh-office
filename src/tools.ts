@@ -27,23 +27,28 @@ export interface ToolHost {
 }
 
 interface AttachmentJson { attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string; originalDimensions?: { width: number; height: number } }
-interface Value { text: string; image?: AttachmentJson }
+interface Value { text: string; image?: AttachmentJson; more?: AttachmentJson[] }
+
+const IMAGE = {
+  type: 'object', additionalProperties: false, properties: {
+    attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' },
+    originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
+  },
+} as const
 
 const output = {
   schema: {
     type: 'object', additionalProperties: false, properties: {
       text: { type: 'string', required: true },
-      image: {
-        type: 'object', additionalProperties: false, properties: {
-          attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' },
-          originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
-        },
-      },
+      image: IMAGE,
+      more: { type: 'array', items: IMAGE },
     },
   },
-  render: (_args: unknown, value: Value) => value.image === undefined
-    ? [{ type: 'text' as const, text: value.text }]
-    : [{ type: 'text' as const, text: value.text }, { type: 'image' as const, attachment: value.image as unknown as ImageAttachmentRef }],
+  render: (_args: unknown, value: Value) => [
+    { type: 'text' as const, text: value.text },
+    ...[value.image, ...(value.more ?? [])].filter((image): image is AttachmentJson => image !== undefined)
+      .map(image => ({ type: 'image' as const, attachment: image as unknown as ImageAttachmentRef })),
+  ],
 } as const
 
 function toJson(ref: ImageAttachmentRef): AttachmentJson {
@@ -87,14 +92,17 @@ const APP = { type: 'string', enum: ['word', 'excel', 'ppt'], description: 'Only
 
 const EDIT_GUIDE = `Edit a document that is open in Word, Excel or PowerPoint, live: each change appears in the window, and the user can keep working in it. Runs ops in order and stops at the first that fails. Does not save (use office_save). Word edits are one undo step for the user; Excel and PowerPoint edits cannot be undone with Ctrl+Z.
 
-Word ops. para = paragraph number from office_read; pass expect = its first words so a number made stale by other edits is caught. where = after (default with para) | before | start | end (default without para).
-- insert_paragraphs {items:[{text, style?}], para?, expect?, where?} — style: Normal, Title, Heading 1..6, List Bullet, List Number, Quote, or a style name the document has. A newline in text starts another paragraph. Items also take the format_text fields.
+Word ops. para = paragraph number from office_read; pass expect = its first words so a number made stale by other edits is caught. where = after (default with para) | before | start | end (default without para: the very end of the document).
+In a form or template whose sections are table cells, write INSIDE the cell: give para = a paragraph of that cell. Without para the text or table lands after everything, outside the form.
+Formulas: write LaTeX between dollar signs in any text: $...$ inside a sentence, $$...$$ as a paragraph of its own. Number a display formula when the document numbers its formulas by ending it with \\tag{1}: $$T=2\\pi\\sqrt{l/g} \\tag{1}$$ puts (1) flush right. They become native Word equations (\\frac, \\sqrt, ^, _, Greek letters, \\bar, \\sum, \\int ...). Never write a formula as plain text such as T = 2π√(l/g).
+- insert_paragraphs {items:[{text, style?}], para?, expect?, where?} — style: Normal, Title, Heading 1..6, List Bullet, List Number, Quote, or a style name the document has. Without style a paragraph is body text in the font, size and spacing of the text it is placed next to. A newline in text starts another paragraph. Items also take the format_text fields.
 - set_text {para, expect, text} — rewrite one paragraph, keeping its style. expect is required ("" for an empty paragraph).
 - replace_text {find, replace, all?}
 - format_text {para?, to?, find?, style?, font?, size?, bold?, italic?, underline?, color?, align?, firstLineIndent?, spaceBefore?, spaceAfter?, lineSpacing?} — para..to, or the first match of find.
-- delete_range {para, expect, to?} — expect is required. Paragraph numbers shift after every insert or delete; each result tells you the new numbers.
-- insert_table {data:[[cell,..],..], para?, where?, header?}; set_cell {table, row, col, text}
-- insert_image {path, para?, where?, width?}
+- delete_range {para, expect, to?} — expect is required; para..to in one operation removes a run of paragraphs (leftover hints, surplus blank lines). Paragraph numbers shift after every insert or delete; each result tells you the new numbers.
+- insert_table {data:[[cell,..],..], caption?, para?, where?, header?} — with para inside a cell, the table goes inside that cell. set_cell {table, row, col, text}
+- Captions: give caption (the title only, no "表 1") on insert_table / insert_image. It is set the standard way: numbered automatically ("表 1", "图 1"), centred, above a table and below a figure. Do not write captions as ordinary paragraphs.
+- insert_image {path, caption?, para?, where?, width?} — the picture is centred on a line of its own.
 
 Excel ops. sheet = sheet name (default: the active sheet).
 - write_range {range: top-left cell, values:[[..],..]} — a string starting with "=" is a formula; also takes the format_range fields.
@@ -119,6 +127,37 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   // The document a call without doc / app is about: the one this plugin last opened or worked on.
   let current: { app: AppKind; doc?: string } | undefined
+  // Documents edited since the model last looked at a picture of them.
+  const unseen = new Set<string>()
+  const keyOf = (on: { app: AppKind; doc?: string }): string => `${on.app}:${fileName(on.doc).toLowerCase()}`
+
+  /** Pictures of the document as it is now: Word pages or PowerPoint slides first..last, or an Excel range. */
+  const picture = async (on: { app: AppKind; doc?: string }, first: number, last: number, extra: Record<string, unknown>, width: number): Promise<{ lines: string[]; images: AttachmentJson[]; total?: number }> => {
+    const folder = join(tmpdir(), 'dsh-office')
+    await mkdir(folder, { recursive: true })
+    const lines: string[] = []
+    const images: AttachmentJson[] = []
+    let total: number | undefined
+    for (let number = first; number <= last; number++) {
+      const out = join(folder, `render-${process.pid}-${Date.now()}-${number}.png`)
+      try {
+        const which = on.app === 'word' ? { page: number } : on.app === 'ppt' ? { slide: number } : {}
+        const result = await helper.call<{ what: string; width: number; height: number }>('render', { ...on, ...extra, ...which, out, width }, 50_000)
+        images.push(toJson(await host.saveImage(await readFile(out), `${on.app}-${result.what.replace(/[^\w一-龥]+/g, '-')}.png`)))
+        lines.push(`${APP_NAMES[on.app]} ${result.what}, ${result.width}×${result.height}.`)
+        const of = / of (\d+)$/.exec(result.what)
+        if (of) { total = Number(of[1]); last = Math.min(last, total) }
+      } catch (error) {
+        // A page past the end stops the run; what was pictured before it is still returned.
+        if (images.length === 0) throw error
+        if (on.app === 'word') lines.push(error instanceof Error ? error.message : String(error))
+        break
+      } finally {
+        await rm(out, { force: true })
+      }
+    }
+    return { lines, images, ...(total === undefined ? {} : { total }) }
+  }
   /** The helper arguments naming the document; the app comes from doc / app only, never from a save-as path. */
   const target = (args: Target): { app: AppKind; doc?: string } => {
     if (args.doc === undefined && args.app === undefined) {
@@ -206,7 +245,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const input = args as unknown as Target & { ops: unknown }
       if (!Array.isArray(input.ops) || input.ops.length === 0) throw new Error('ops must be a non-empty array.')
       if (input.ops.length > 200) throw new Error('At most 200 operations per call.')
-      const result = await helper.call<EditResult>('edit', { ...target(input), ops: input.ops }, 4.5 * 60_000)
+      const { follow, typing, card } = host.settings()
+      const on = target(input)
+      const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card }, 4.5 * 60_000)
+      if (result.done.length > 0) unseen.add(keyOf(on))
       return { text: formatEdit(result) }
     },
     presentCall: args => {
@@ -217,40 +259,37 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'office_render',
-    description: 'Get a picture of how the document really looks, to check layout after editing: a Word page, a PowerPoint slide, or an Excel range (default: the used range). Cheaper and sharper than a screenshot, and works with the window in the background.',
+    description: 'Get a picture of how the open document really looks: a Word page, a PowerPoint slide (with "to": up to 4 in a row), or an Excel range (default: the used range). Use it on every page you changed before you finish: it shows what office_read cannot, such as content that landed outside its frame, a table that is too wide, text that overflows. It pictures the document as Word itself lays it out, unsaved changes included, with the window in the background.',
     parameters: {
       doc: DOC,
       app: APP,
       page: { type: 'integer', description: 'Word: page number (default 1).' },
       slide: { type: 'integer', description: 'PowerPoint: slide number.' },
+      to: { type: 'integer', description: 'Word / PowerPoint: last page or slide, to get up to 4 in one call.' },
       sheet: { type: 'string', description: 'Excel: sheet name.' },
       range: { type: 'string', description: 'Excel: range to picture.' },
     },
     output,
     timeoutMs: 60_000,
     async execute(args, exec): Promise<Value> {
-      const input = args as Target & { page?: number; slide?: number; sheet?: string; range?: string }
+      const input = args as Target & { page?: number; slide?: number; to?: number; sheet?: string; range?: string }
       const on = target(input), kind = on.app
       if (kind === 'ppt' && input.slide === undefined) throw new Error('slide is required for PowerPoint.')
       if (!await host.vision(exec)) return { text: 'The current model cannot view images; check the result with office_read instead.' }
-      const folder = join(tmpdir(), 'dsh-office')
-      await mkdir(folder, { recursive: true })
-      const out = join(folder, `render-${process.pid}-${Date.now()}.png`)
-      try {
-        const { doc: _doc, app: _app, ...rest } = input
-        const result = await helper.call<{ what: string; width: number; height: number }>('render', { ...on, ...rest, out, width: host.settings().renderWidth }, 50_000)
-        const ref = await host.saveImage(await readFile(out), `${kind}-${result.what.replace(/[^\w一-龥]+/g, '-')}.png`)
-        return { text: `${APP_NAMES[kind]} ${result.what}, ${result.width}×${result.height}.`, image: toJson(ref) }
-      } finally {
-        await rm(out, { force: true })
-      }
+      const { doc: _doc, app: _app, to, page: _page, slide: _slide, ...rest } = input
+      const first = kind === 'word' ? input.page ?? 1 : kind === 'ppt' ? input.slide! : 0
+      const last = kind === 'excel' || to === undefined ? first : Math.min(Math.max(to, first), first + 3)
+      const { lines, images } = await picture(on, first, last, rest, host.settings().renderWidth)
+      unseen.delete(keyOf(on))
+      const [image, ...more] = images
+      return { text: lines.join('\n'), ...(image === undefined ? {} : { image }), ...(more.length ? { more } : {}) }
     },
     presentCall: args => card(`查看 ${fileName((args as Target).doc) || '当前文档'} 的排版`),
   }))
 
   tools.push(defineTool({
     name: 'office_save',
-    description: 'Save the open document. With path: save a copy under another name or format (.pdf exports a PDF and keeps the document as it is; other extensions switch the document to the new file).',
+    description: 'Save the open document; if you have edited since you last looked at it, the reply also shows you its pages for a final check. With path: save a copy under another name or format (.pdf exports a PDF and keeps the document as it is; other extensions switch the document to the new file).',
     parameters: {
       doc: DOC,
       app: APP,
@@ -258,11 +297,30 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     },
     output,
     timeoutMs: 120_000,
-    async execute(args): Promise<Value> {
+    async execute(args, exec): Promise<Value> {
       const input = args as Target & { path?: string }
       if (input.path !== undefined && !isAbsolute(input.path)) throw new Error('path must be an absolute path.')
-      const result = await helper.call<{ path: string; bytes: number }>('save', { ...target(input), ...(input.path === undefined ? {} : { path: input.path }) }, 110_000)
-      return { text: `Saved ${result.path} (${result.bytes} bytes).` }
+      const on = target(input)
+      const result = await helper.call<{ path: string; bytes: number }>('save', { ...on, ...(input.path === undefined ? {} : { path: input.path }) }, 110_000)
+      // Saved under a new name, the open document IS that file now; a PDF is only an export.
+      const moved = input.path !== undefined && extname(input.path).toLowerCase() !== '.pdf'
+      const wasUnseen = unseen.delete(keyOf(on))
+      if (moved) current = { app: on.app, doc: result.path }
+      const text = `Saved ${result.path} (${result.bytes} bytes).${moved ? ' The open document is now this file.' : ''}`
+      // The whole-document check before delivery: the model has edited since it last looked, so it is shown the result.
+      if (!wasUnseen || !host.settings().finalCheck || !await host.vision(exec)) return { text }
+      try {
+        const now = moved ? { app: on.app, doc: result.path } : on
+        const shown = await picture(now, 1, on.app === 'excel' ? 1 : 8, {}, Math.min(host.settings().renderWidth, 800))
+        const [image, ...more] = shown.images
+        const scope = on.app === 'excel' ? 'the sheet' : `${shown.images.length}${shown.total !== undefined && shown.total > shown.images.length ? ` of ${shown.total}` : ''} ${on.app === 'word' ? 'page(s)' : 'slide(s)'}`
+        return {
+          text: `${text}\nFinal check: you edited after you last looked at the document, so here is ${scope} as it is now. Go through every picture before you tell the user it is done. If anything is off (content outside its frame, uneven fonts or spacing, formulas as plain text, bad tables, leftover hints, blank gaps), fix it with office_edit and save again; if all is well, say so.`,
+          ...(image === undefined ? {} : { image }), ...(more.length ? { more } : {}),
+        }
+      } catch {
+        return { text }
+      }
     },
     presentCall: args => card(`保存 ${fileName((args as { path?: string }).path ?? (args as Target).doc) || '当前文档'}`),
   }))

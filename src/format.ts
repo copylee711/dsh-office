@@ -10,7 +10,7 @@ export const APP_NAMES: Record<AppKind, string> = { word: 'Word', excel: 'Excel'
 export interface DocInfo { app: AppKind; name: string; path: string | null; saved: boolean; active: boolean; readOnly?: boolean; how?: 'attached' | 'opened' | 'created' }
 export interface AppStatus { app: AppKind; installed: boolean; running: boolean; version?: string; error?: string; documents: DocInfo[] }
 
-export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string }
+export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string; open?: boolean; inTable?: boolean }
 export interface WordRead { paragraphs: number; tables: number; pages?: number; from?: number; items?: WordItem[]; more?: string; table?: number; cells?: Array<Array<string | null>> }
 export interface ExcelRead { sheets: Array<{ name: string; used: string; charts?: number }>; sheet: string; range: string; values: unknown[][]; formulas?: Array<{ cell: string; formula: string }>; clipped?: string }
 export interface PptRead { slides: number; width: number; height: number; items: Array<{ slide: number; layout?: string; shapes: Array<{ name: string; type: string; box: number[]; text?: string }> }> }
@@ -45,9 +45,12 @@ export function formatWord(read: WordRead): string {
   }
   const head = `${read.paragraphs} paragraphs, ${read.tables} table(s)${read.pages === undefined ? '' : `, ${read.pages} page(s)`}.`
   const lines = (read.items ?? []).map(item => {
-    if (item.table !== undefined) return `${item.i}–${item.to} [table ${item.table}, ${item.size}]`
+    if (item.size !== undefined) {
+      const name = item.table === undefined ? 'table inside a cell' : `table ${item.table}`
+      return `${item.i}–${item.to} [${name}, ${item.size}]${item.open ? ' holds the text below; write inside it by paragraph number:' : ''}`
+    }
     const tag = item.level !== undefined ? `H${item.level}` : item.style !== undefined && !BODY_STYLES.has(item.style.toLowerCase()) ? item.style : ''
-    return `${item.i}${tag ? ` [${tag}]` : ''} ${item.text ? item.text : '(empty)'}`
+    return `${item.inTable ? '  ' : ''}${item.i}${tag ? ` [${tag}]` : ''} ${item.text ? item.text : '(empty)'}`
   })
   return [head, ...lines, ...(read.more ? [read.more] : [])].join('\n')
 }
@@ -76,7 +79,7 @@ export function formatPpt(read: PptRead): string {
 
 export function formatEdit(result: EditResult): string {
   const done = result.done.map((line, index) => `${index + 1}. ${line}`)
-  if (!result.failed) return [`All ${result.total} operation(s) applied (not saved yet):`, ...done].join('\n')
+  if (!result.failed) return [`All ${result.total} operation(s) applied (not saved yet):`, ...done, 'Before you finish, look at the pages you changed with office_render and fix what is off.'].join('\n')
   const { index, op, error } = result.failed
   return [
     `Stopped at operation ${index + 1} (${op}): ${error}`,
