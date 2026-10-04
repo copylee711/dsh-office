@@ -156,7 +156,7 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
     h('section', { style: S.card },
       h('h3', { style: S.cardTitle }, '行为'),
       h('div', { style: S.toggleRow },
-        h('div', { style: S.toggleText }, '跟随 AI 的修改位置', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 改到哪里，窗口就自动滚动到哪里（Word 滚到那一段，Excel 滚到那片单元格，PowerPoint 切到那一页），不用自己翻找。关闭即静默执行：AI 照常修改，但不动你的视图。')),
+        h('div', { style: S.toggleText }, '跟随 AI 的修改位置', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 改到哪里，窗口就自动滚动到哪里（Word 滚到那一段，Excel 滚到那片单元格，PowerPoint 切到那一页），不用自己翻找。关闭即静默执行：AI 照常修改，但不动你的视图。想看时点迷你卡片上的“跟随”：文档窗口被带到前台并开始跟随；你切到别的窗口后它自动熄灭，再点一次回来。')),
         h(Switch, { checked: settings.follow, disabled, label: '跟随 AI 的修改位置', onChange: value => { void change('follow', value) } }),
       ),
       h('div', { style: S.toggleRow },

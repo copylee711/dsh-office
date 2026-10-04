@@ -119,6 +119,20 @@ class Card : Form
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
 
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr handle, int command);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr handle);
+
+    /// The user is looking at the document: its window is the foreground one.
+    static bool Watching()
+    {
+        IntPtr doc = Program.DocWindow;
+        return doc != IntPtr.Zero && GetForegroundWindow() == doc;
+    }
+
+    // Following means "keep the document in front of me and scroll to the edits". It holds while the user
+    // stays in that window; once they go elsewhere it switches itself off, and the button brings them back.
+    bool wasWatching, lit;
 
     protected override bool ShowWithoutActivation { get { return true; } }
 
@@ -147,7 +161,21 @@ class Card : Form
         Location = new Point(area.Right - Width - S(18), area.Bottom - Height - S(18));
         using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(new Rectangle(0, 0, Width, Height), S(10))) Region = new Region(path);
         timer.Interval = 500;
-        timer.Tick += delegate { if (Visible && (DateTime.UtcNow - shown).TotalSeconds > 6) Hide(); };
+        timer.Tick += delegate
+        {
+            bool watching = Watching();
+            if (watching) wasWatching = true;
+            else if (wasWatching && Program.Following)
+            {
+                // The user left the document for another window.
+                wasWatching = false;
+                Program.Following = false;
+                FollowChosen = true;
+            }
+            bool nowLit = Program.Following && watching;
+            if (nowLit != lit) { lit = nowLit; Invalidate(); }
+            if (Visible && (DateTime.UtcNow - shown).TotalSeconds > 6) Hide();
+        };
         timer.Start();
     }
 
@@ -187,7 +215,7 @@ class Card : Form
         {
             int right = Width - S(10);
             Chip(g, font, "逐字", Program.Typing, ref right, out typingBox);
-            Chip(g, font, "跟随", Program.Following, ref right, out followBox);
+            Chip(g, font, "跟随", Program.Following && Watching(), ref right, out followBox);
             using (SolidBrush dot = new SolidBrush(Color.FromArgb(217, 119, 87))) g.FillEllipse(dot, S(12), (Height - S(8)) / 2, S(8), S(8));
             Rectangle text = new Rectangle(S(26), 0, right - S(30), Height);
             TextRenderer.DrawText(g, line, font, text, Color.FromArgb(235, 235, 240), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -208,7 +236,23 @@ class Card : Form
     {
         pressed = false;
         if (dragged) return;
-        if (followBox.Contains(e.Location)) { Program.Following = !Program.Following; FollowChosen = true; }
+        if (followBox.Contains(e.Location))
+        {
+            FollowChosen = true;
+            if (Program.Following && Watching()) Program.Following = false;
+            else
+            {
+                // Bring the document to the front and follow from here on.
+                Program.Following = true;
+                wasWatching = true;
+                IntPtr doc = Program.DocWindow;
+                if (doc != IntPtr.Zero)
+                {
+                    if (IsIconic(doc)) ShowWindow(doc, 9);
+                    SetForegroundWindow(doc);
+                }
+            }
+        }
         else if (typingBox.Contains(e.Location)) { Program.Typing = !Program.Typing; TypingChosen = true; }
         shown = DateTime.UtcNow;
         Invalidate();
@@ -560,6 +604,7 @@ static class Program
         }
         Dictionary<string, object> info = Info(kind, doc, Active(kind, app));
         info["how"] = how;
+        Remember(doc);
         if (a.Flag("card", false))
         {
             if (!cardStarted) { cardStarted = true; Card.Start(); }
@@ -680,6 +725,14 @@ static class Program
 
     /// Scroll the window to where the agent is working (off = silent mode: the user's view is left alone).
     public static volatile bool Following;
+    /// The window of the document being worked on (0 when unknown), for the card to bring forward.
+    public static IntPtr DocWindow = IntPtr.Zero;
+
+    static void Remember(dynamic doc)
+    {
+        try { DocWindow = new IntPtr(Convert.ToInt64(doc.Windows[1].Hwnd)); }
+        catch (Exception) { DocWindow = IntPtr.Zero; }
+    }
     /// Write text a few characters at a time, the way a person types, instead of all at once.
     public static volatile bool Typing;
 
@@ -1793,6 +1846,7 @@ static class Program
         if (!Card.FollowChosen) Following = a.Flag("follow", false);
         if (!Card.TypingChosen) Typing = a.Flag("typing", false);
         bool card = a.Flag("card", false);
+        Remember(doc);
         if (card && !cardStarted) { cardStarted = true; Card.Start(); }
         string docName = (string)doc.Name;
         dynamic undo = null;
