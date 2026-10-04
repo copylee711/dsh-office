@@ -158,6 +158,29 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     }
     return { lines, images, ...(total === undefined ? {} : { total }) }
   }
+
+  /** The whole document at a glance: its pages (6 to a picture) or slides tiled with their numbers, up to 18. */
+  const overview = async (on: { app: AppKind; doc?: string }): Promise<{ lines: string[]; images: AttachmentJson[] }> => {
+    if (on.app === 'excel') return picture(on, 0, 0, {}, Math.min(host.settings().renderWidth, 1000))
+    const folder = join(tmpdir(), 'dsh-office')
+    await mkdir(folder, { recursive: true })
+    const lines: string[] = []
+    const images: AttachmentJson[] = []
+    let total = 1
+    for (let from = 1; from <= Math.min(total, 18); from += 6) {
+      const out = join(folder, `sheet-${process.pid}-${Date.now()}-${from}.png`)
+      try {
+        const result = await helper.call<{ what: string; total: number; width: number; height: number }>('render', { ...on, sheet: true, from, to: from + 5, out, width: 640 }, 110_000)
+        total = result.total
+        images.push(toJson(await host.saveImage(await readFile(out), `${on.app}-overview-${from}.png`)))
+        lines.push(`${APP_NAMES[on.app]} ${result.what}, tiled in one picture.`)
+      } finally {
+        await rm(out, { force: true })
+      }
+    }
+    if (total > 18) lines.push(`Only the first 18 of ${total} are shown.`)
+    return { lines, images }
+  }
   /** The helper arguments naming the document; the app comes from doc / app only, never from a save-as path. */
   const target = (args: Target): { app: AppKind; doc?: string } => {
     if (args.doc === undefined && args.app === undefined) {
@@ -260,24 +283,31 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'office_render',
-    description: 'Get a picture of how the open document really looks: a Word page, a PowerPoint slide (with "to": up to 4 in a row), or an Excel range (default: the used range). Use it on every page you changed before you finish: it shows what office_read cannot, such as content that landed outside its frame, a table that is too wide, text that overflows. It pictures the document as Word itself lays it out, unsaved changes included, with the window in the background.',
+    description: 'Get a picture of how the open document really looks: a Word page, a PowerPoint slide (with "to": up to 4 in a row), an Excel range (default: the used range), or with overview: true the whole document tiled into one picture. Use it on every page you changed before you finish: it shows what office_read cannot, such as content that landed outside its frame, a table that is too wide, text that overflows. It pictures the document as Word itself lays it out, unsaved changes included, with the window in the background.',
     parameters: {
       doc: DOC,
       app: APP,
       page: { type: 'integer', description: 'Word: page number (default 1).' },
       slide: { type: 'integer', description: 'PowerPoint: slide number.' },
       to: { type: 'integer', description: 'Word / PowerPoint: last page or slide, to get up to 4 in one call.' },
+      overview: { type: 'boolean', description: 'Word / PowerPoint: every page or slide tiled into one picture (6 pages per picture, numbered): the whole document at a glance, for the final check. Then look closer at a page with page / slide.' },
       sheet: { type: 'string', description: 'Excel: sheet name.' },
       range: { type: 'string', description: 'Excel: range to picture.' },
     },
     output,
     timeoutMs: 60_000,
     async execute(args, exec): Promise<Value> {
-      const input = args as Target & { page?: number; slide?: number; to?: number; sheet?: string; range?: string }
+      const input = args as Target & { page?: number; slide?: number; to?: number; sheet?: string; range?: string; overview?: boolean }
       const on = target(input), kind = on.app
-      if (kind === 'ppt' && input.slide === undefined) throw new Error('slide is required for PowerPoint.')
+      if (kind === 'ppt' && input.slide === undefined && input.overview !== true) throw new Error('slide is required for PowerPoint (or pass overview: true).')
       if (!await host.vision(exec)) return { text: 'The current model cannot view images; check the result with office_read instead.' }
-      const { doc: _doc, app: _app, to, page: _page, slide: _slide, ...rest } = input
+      if (input.overview === true && kind !== 'excel') {
+        const all = await overview(on)
+        unseen.delete(keyOf(on))
+        const [image, ...more] = all.images
+        return { text: all.lines.join('\n'), ...(image === undefined ? {} : { image }), ...(more.length ? { more } : {}) }
+      }
+      const { doc: _doc, app: _app, to, page: _page, slide: _slide, overview: _overview, ...rest } = input
       const first = kind === 'word' ? input.page ?? 1 : kind === 'ppt' ? input.slide! : 0
       const last = kind === 'excel' || to === undefined ? first : Math.min(Math.max(to, first), first + 3)
       const { lines, images } = await picture(on, first, last, rest, host.settings().renderWidth)
@@ -312,11 +342,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       if (!wasUnseen || !host.settings().finalCheck || !await host.vision(exec)) return { text }
       try {
         const now = moved ? { app: on.app, doc: result.path } : on
-        const shown = await picture(now, 1, on.app === 'excel' ? 1 : 8, {}, Math.min(host.settings().renderWidth, 800))
+        const shown = await overview(now)
         const [image, ...more] = shown.images
-        const scope = on.app === 'excel' ? 'the sheet' : `${shown.images.length}${shown.total !== undefined && shown.total > shown.images.length ? ` of ${shown.total}` : ''} ${on.app === 'word' ? 'page(s)' : 'slide(s)'}`
         return {
-          text: `${text}\nFinal check: you edited after you last looked at the document, so here is ${scope} as it is now. Go through every picture before you tell the user it is done. If anything is off (content outside its frame, uneven fonts or spacing, formulas as plain text, bad tables, leftover hints, blank gaps), fix it with office_edit and save again; if all is well, say so.`,
+          text: `${text}\nFinal check: you edited after you last looked at the document, so here is the whole of it as it is now. ${shown.lines.join(' ')}\nGo through every page before you tell the user it is done. If anything is off (content outside its frame, uneven fonts or spacing, formulas as plain text, bad tables, leftover hints, blank gaps, a nearly empty last page), look closer with office_render, fix it with office_edit and save again; if all is well, say so.`,
           ...(image === undefined ? {} : { image }), ...(more.length ? { more } : {}),
         }
       } catch {

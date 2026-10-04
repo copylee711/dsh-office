@@ -168,7 +168,7 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
         h(Switch, { checked: settings.card, disabled, label: '迷你卡片', onChange: value => { void change('card', value) } }),
       ),
       h('div', { style: S.toggleRow },
-        h('div', { style: S.toggleText }, '交付前整体视觉检查', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 保存时，如果它改完之后还没看过成品，就自动把文档各页（最多 8 页）渲染成图片交给它过一遍，发现问题先修再交付。会多用一些 token。')),
+        h('div', { style: S.toggleText }, '交付前整体视觉检查', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 保存时，如果它改完之后还没看过成品，就自动把整份文档拼成带页码的总览图（一张图最多 6 页）交给它过一遍，发现问题先修再交付。会多用一些 token。')),
         h(Switch, { checked: settings.finalCheck, disabled, label: '交付前整体视觉检查', onChange: value => { void change('finalCheck', value) } }),
       ),
       h('div', { style: S.toggleRow },
