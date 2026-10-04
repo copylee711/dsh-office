@@ -1,0 +1,84 @@
+# 发布到 npm（@copylee/dsh-office）
+#
+# 触发方式：
+#   1. 推送版本 tag：先把 package.json 的 version 改好并合并到 main，
+#      然后 `git tag v0.1.1 && git push origin v0.1.1`
+#   2. 手动：Actions → Publish to npm → Run workflow（发布所选分支上 package.json 的当前版本）
+#
+# 认证（二选一）：
+#   - Trusted Publishing（推荐，无需密钥）：npmjs.com → 包设置 → Trusted Publisher → GitHub Actions，
+#     owner=copylee711、repository=dsh-office、workflow=publish.yml
+#   - 访问令牌：仓库 Settings → Secrets and variables → Actions 新建 NPM_TOKEN
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Trusted Publishing / provenance 需要
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing 需要 npm >= 11.5.1
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and test
+        run: |
+          pnpm run typecheck
+          pnpm test
+
+      - name: Check version
+        id: check
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const ref = process.env.GITHUB_REF || "";
+          if (ref.startsWith("refs/tags/") && ref.slice("refs/tags/v".length) !== pkg.version) {
+            console.log(`::error::tag ${ref.slice("refs/tags/".length)} does not match package.json version ${pkg.version}`);
+            process.exit(1);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `name=${pkg.name}\nversion=${pkg.version}\n`);
+          NODE
+
+      - name: Skip if already published
+        id: exists
+        run: |
+          if npm view "${{ steps.check.outputs.name }}@${{ steps.check.outputs.version }}" version >/dev/null 2>&1; then
+            echo "::notice::${{ steps.check.outputs.name }}@${{ steps.check.outputs.version }} is already on npm, skipping"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # prepare 脚本会在打包前自动执行 pnpm run build
+      - name: Publish
+        if: steps.exists.outputs.published == 'false'
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

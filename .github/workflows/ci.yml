@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - run: pnpm run pack:check
+
+  # The helper is compiled on the user's machine by the in-box .NET Framework
+  # csc.exe; make sure it still compiles there and answers a ping.
+  helper:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm run build
+      - name: Compile and ping the helper
+        run: |
+          node --input-type=module -e "
+          import { HelperClient, ensureHelperExe } from './lib/types/helper-client.js';
+          console.log('exe', await ensureHelperExe());
+          const h = new HelperClient(console.warn);
+          console.log('ping', await h.call('ping'));
+          console.log('status', JSON.stringify(await h.call('status')));
+          h.dispose();
+          "
