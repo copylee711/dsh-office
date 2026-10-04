@@ -1018,11 +1018,40 @@ static class Program
         return made;
     }
 
+    /// Equations on a line of their own built during the current operation (their ranges: these keep pointing at the
+    /// equation while the document grows). They are set off from the text once the operation is done: a paragraph
+    /// inserted after one takes over its look, and must not take over this.
+    static readonly List<object> Displays = new List<object>();
+
+    /// As typeset papers do: some space above and below the equation, and a line that grows with the formula
+    /// (an exact line height would cut a tall one off).
+    static void SetOff()
+    {
+        foreach (dynamic equation in Displays)
+        {
+            try
+            {
+                dynamic paragraph = equation.Paragraphs[1];
+                dynamic range = paragraph.Range;
+                dynamic math = range.OMaths[1].Range;
+                if ((int)range.OMaths.Count != 1) continue;
+                if ((int)range.End - (int)range.Start > (int)math.End - (int)math.Start + 3) continue;
+                dynamic format = paragraph.Format;
+                if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f;
+                if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f;
+                if ((int)format.LineSpacingRule == 4) format.LineSpacingRule = 3;
+            }
+            catch (Exception) { }
+        }
+        Displays.Clear();
+    }
+
     /// Formulas that could not be turned into equations during the current operation (they stay as text).
     static int MathFailed;
 
     static string MathNote()
     {
+        SetOff();
         if (MathFailed == 0) return "";
         string note = " — NOTE " + MathFailed + " formula(s) could not be built and were left as text: check them with office_render and rewrite them more simply";
         MathFailed = 0;
@@ -1050,6 +1079,7 @@ static class Program
                 dynamic math = doc.OMaths.Add(spot);
                 math.OMaths[1].BuildUp();
                 if (display) { try { math.OMaths[1].Type = 0; math.OMaths[1].Justification = 1; } catch (COMException) { } }
+                if (display) { try { Displays.Add(math.OMaths[1].Range); } catch (Exception) { } }
                 return true;
             }
             catch (COMException) { return false; }
