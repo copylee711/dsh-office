@@ -12,7 +12,7 @@ const steps = JSON.parse(process.argv[2].replaceAll('$DIR', dir.replaceAll('\\',
 const helper = new HelperClient(console.warn)
 for (const [cmd, args] of steps) {
   try {
-    console.log(`${cmd} →`, JSON.stringify(await helper.call(cmd, args, 60_000), null, 1))
+    console.log(`${cmd} →`, JSON.stringify(await helper.call(cmd, args, Number(process.env.TRY_TIMEOUT || 60_000)), null, 1))
   } catch (error) {
     console.log(`${cmd} ✗ [${error.code}]`, error.message)
   }

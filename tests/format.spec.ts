@@ -51,6 +51,7 @@ describe('what the model reads', () => {
 
   it('reports a finished batch as not saved yet, and a failed one with where it stopped', () => {
     expect(formatEdit({ done: ['replaced 2', 'formatted'], total: 2 })).toBe('All 2 operation(s) applied (not saved yet):\n1. replaced 2\n2. formatted\nBefore you finish, look at the pages you changed with office_render and fix what is off.')
-    expect(formatEdit({ done: [], total: 1, failed: { index: 0, op: 'set_text', code: 'ANCHOR_MISMATCH', error: 'changed' } })).toBe('Stopped at operation 1 (set_text): changed\nNothing was applied.')
+    expect(formatEdit({ done: [], total: 1, failed: { index: 0, op: 'set_text', code: 'ANCHOR_MISMATCH', error: 'changed' } })).toBe('Stopped at operation 1 (set_text): changed\nNothing before it was applied.')
+    expect(formatEdit({ done: [], total: 1, failed: { index: 0, op: 'insert_paragraphs', code: 'OFFICE_ERROR', error: 'boom' } })).toContain('may have changed part of the document')
   })
 })

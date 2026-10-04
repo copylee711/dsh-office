@@ -77,13 +77,17 @@ export function formatPpt(read: PptRead): string {
   return lines.join('\n')
 }
 
+/** Failures found before anything was touched. */
+const PRECHECKED = new Set(['BAD_ARGS', 'ANCHOR_MISSING', 'ANCHOR_MISMATCH', 'NOT_FOUND', 'STYLE_MISSING', 'BUSY'])
+
 export function formatEdit(result: EditResult): string {
   const done = result.done.map((line, index) => `${index + 1}. ${line}`)
   if (!result.failed) return [`All ${result.total} operation(s) applied (not saved yet):`, ...done, 'Before you finish, look at the pages you changed with office_render and fix what is off.'].join('\n')
   const { index, op, error } = result.failed
   return [
     `Stopped at operation ${index + 1} (${op}): ${error}`,
-    done.length ? `Applied before it:\n${done.join('\n')}` : 'Nothing was applied.',
+    done.length ? `Applied before it:\n${done.join('\n')}` : 'Nothing before it was applied.',
+    PRECHECKED.has(result.failed.code) ? '' : 'The failed operation itself may have changed part of the document: read it before you retry.',
     result.total - index - 1 > 0 ? `The ${result.total - index - 1} operation(s) after it did not run.` : '',
   ].filter(Boolean).join('\n')
 }

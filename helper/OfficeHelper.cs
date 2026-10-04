@@ -119,6 +119,8 @@ class Card : Form
     static readonly ManualResetEvent Ready = new ManualResetEvent(false);
     /// Set once the user has flipped a switch here: from then on the card, not the settings page, decides.
     public static volatile bool FollowChosen, TypingChosen;
+    /// Set for as long as an edit is running: the card stays up through it, however long one operation takes, and goes when it ends.
+    public static volatile bool Hold;
 
     string line = "";
     DateTime shown = DateTime.MinValue;
@@ -184,7 +186,7 @@ class Card : Form
             }
             bool nowLit = Program.Following && watching;
             if (nowLit != lit) { lit = nowLit; Invalidate(); }
-            if (Visible && (DateTime.UtcNow - shown).TotalSeconds > 6) Hide();
+            if (Visible && !Hold && (DateTime.UtcNow - shown).TotalSeconds > 1) Hide();
         };
         timer.Start();
     }
@@ -226,7 +228,7 @@ class Card : Form
             int right = Width - S(10);
             Chip(g, font, "逐字", Program.Typing, ref right, out typingBox);
             bool following = Program.Following && Watching();
-            Chip(g, font, following ? "跟随中" : "跟随", following, ref right, out followBox);
+            Chip(g, font, following ? "查看中" : "查看", following, ref right, out followBox);
             using (SolidBrush dot = new SolidBrush(Color.FromArgb(217, 119, 87))) g.FillEllipse(dot, S(12), (Height - S(8)) / 2, S(8), S(8));
             Rectangle text = new Rectangle(S(26), 0, right - S(30), Height);
             TextRenderer.DrawText(g, line, font, text, Color.FromArgb(235, 235, 240), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -507,6 +509,13 @@ static class Program
     static object Run(string cmd, Bag a)
     {
         if (cmd == "ping") return "pong";
+        if (cmd == "card")
+        {
+            // The agent's turn ended: say so and let the card go.
+            Card.Hold = a.Flag("hold", false);
+            if (cardStarted) Card.Report(a.Str("text", "AI 已完成"));
+            return "ok";
+        }
         if (cmd == "status") return Status();
         string kind = Kind(a);
         if (cmd == "open") return Open(kind, a);
@@ -621,7 +630,7 @@ static class Program
             if (!cardStarted) { cardStarted = true; Card.Start(); }
             Following = Card.FollowChosen ? Following : a.Flag("follow", false);
             Typing = Card.TypingChosen ? Typing : a.Flag("typing", false);
-            Card.Report("AI 打开了 " + (string)doc.Name);
+            // No card here: it shows while an edit is running.
         }
         return info;
     }
@@ -650,6 +659,7 @@ static class Program
 
     static object Save(string kind, dynamic app, dynamic doc, Bag a)
     {
+        if (kind == "word") Refresh(doc);
         string path = a.Str("path", null);
         Dictionary<string, object> result = new Dictionary<string, object>();
         if (path == null)
@@ -755,11 +765,11 @@ static class Program
         try { doc.Windows[1].ScrollIntoView(range, true); } catch (Exception) { }
     }
 
-    /// Pieces to write a text in: up to 40 of them, so that a long paragraph still takes about a second.
+    /// Pieces to write a text in: up to 14 of them, so that a long paragraph takes about a third of a second.
     static List<string> Pieces(string text)
     {
         List<string> pieces = new List<string>();
-        int size = Math.Max(2, (int)Math.Ceiling(text.Length / 40.0));
+        int size = Math.Max(3, (int)Math.Ceiling(text.Length / 14.0));
         for (int i = 0; i < text.Length; i += size) pieces.Add(text.Substring(i, Math.Min(size, text.Length - i)));
         return pieces;
     }
@@ -777,7 +787,7 @@ static class Program
         {
             doc.Range(at, at).InsertAfter(piece);
             at += piece.Length;
-            Thread.Sleep(22);
+            Thread.Sleep(14);
         }
         return at;
     }
@@ -797,6 +807,9 @@ static class Program
         { "to", "→" }, { "rightarrow", "→" }, { "leftarrow", "←" }, { "Rightarrow", "⇒" }, { "Leftrightarrow", "⇔" }, { "in", "∈" }, { "notin", "∉" },
         { "subset", "⊂" }, { "cup", "∪" }, { "cap", "∩" }, { "forall", "∀" }, { "exists", "∃" }, { "angle", "∠" }, { "perp", "⊥" }, { "parallel", "∥" },
         { "circ", "∘" }, { "degree", "°" }, { "ldots", "…" }, { "cdots", "⋯" }, { "dots", "…" }, { "prime", "′" }, { "hbar", "ℏ" }, { "ell", "ℓ" },
+        { "Vert", "‖" }, { "lVert", "‖" }, { "rVert", "‖" }, { "vert", "|" }, { "lvert", "|" }, { "rvert", "|" }, { "mid", "|" },
+        { "top", "⊤" }, { "langle", "⟨" }, { "rangle", "⟩" }, { "otimes", "⊗" }, { "oplus", "⊕" }, { "neg", "¬" }, { "ast", "∗" },
+        { "det", "det" }, { "rank", "rank" }, { "dim", "dim" }, { "sup", "sup" }, { "inf", "inf" }, { "arg", "arg" }, { "cond", "cond" },
         { "quad", " " }, { "qquad", "  " }, { "left", "" }, { "right", "" }, { "displaystyle", "" }, { "limits", "" }, { "lim", "lim" },
         { "sin", "sin" }, { "cos", "cos" }, { "tan", "tan" }, { "cot", "cot" }, { "ln", "ln" }, { "log", "log" }, { "exp", "exp" }, { "max", "max" }, { "min", "min" },
         { "arcsin", "arcsin" }, { "arccos", "arccos" }, { "arctan", "arctan" }, { "sinh", "sinh" }, { "cosh", "cosh" }, { "tanh", "tanh" },
@@ -842,9 +855,19 @@ static class Program
     {
         StringBuilder o = new StringBuilder();
         int i = 0;
+        // A sum, product or integral was written and its limits may still follow; what comes after them is its
+        // operand, which Word's linear format introduces with "▒" (left out, Word draws an empty box there).
+        bool nary = false;
         while (i < s.Length)
         {
             char c = s[i];
+            if (nary && c != '^' && c != '_' && c != ' ')
+            {
+                if (c == '\\' && string.CompareOrdinal(s, i, "\\limits", 0, 7) == 0) { i += 7; continue; }
+                if (c == '\\' && string.CompareOrdinal(s, i, "\\nolimits", 0, 9) == 0) { i += 9; continue; }
+                o.Append('▒');
+                nary = false;
+            }
             if (c == '\\')
             {
                 int start = ++i;
@@ -853,12 +876,51 @@ static class Program
                 {
                     // \, \; \! \  are spacing; \{ \} \% and the like are the character itself.
                     char next = i < s.Length ? s[i++] : ' ';
-                    if (next == ',' || next == ';' || next == ':' || next == ' ') o.Append(' ');
+                    if (next == '|') o.Append('‖');
+                    else if (next == ',' || next == ';' || next == ':' || next == ' ') o.Append(' ');
                     else if (next == '\\') o.Append(' ');
                     else if (next != '!') o.Append(next);
                     continue;
                 }
                 string name = s.Substring(start, i - start);
+                if (name == "begin")
+                {
+                    // \begin{pmatrix} a & b \\ c & d \end{pmatrix}: Word's linear form is (■(a&b@c&d)).
+                    int close = s.IndexOf('}', i);
+                    string env = close > i ? s.Substring(i + 1, close - i - 1).Trim() : "";
+                    string ending = "\\end{" + env + "}";
+                    int stop = close > i ? s.IndexOf(ending, close, StringComparison.Ordinal) : -1;
+                    if (stop > 0)
+                    {
+                        string body = s.Substring(close + 1, stop - close - 1);
+                        i = stop + ending.Length;
+                        if (env == "array" && body.TrimStart().StartsWith("{", StringComparison.Ordinal)) body = body.Substring(body.IndexOf('}') + 1);
+                        List<string> rows = new List<string>();
+                        foreach (string row in body.Replace("\\\\", "\u0001").Split('\u0001'))
+                        {
+                            if (row.Trim().Length == 0) continue;
+                            List<string> cells = new List<string>();
+                            foreach (string cell in row.Split('&')) cells.Add(Tex(cell.Trim()));
+                            rows.Add(string.Join("&", cells.ToArray()));
+                        }
+                        string grid = string.Join("@", rows.ToArray());
+                        if (env == "pmatrix") o.Append("(■(" + grid + "))");
+                        else if (env == "bmatrix") o.Append("[■(" + grid + ")]");
+                        else if (env == "vmatrix") o.Append("|■(" + grid + ")|");
+                        else if (env == "Vmatrix") o.Append("‖■(" + grid + ")‖");
+                        else if (env == "cases") o.Append("{█(" + grid + ")┤");
+                        else if (env == "aligned" || env == "align" || env == "split" || env == "gathered") o.Append("█(" + grid + ")");
+                        else o.Append("■(" + grid + ")");
+                        continue;
+                    }
+                }
+                if (name == "mathbb")
+                {
+                    string letter = TexArg(s, ref i);
+                    string doubled = letter == "R" ? "ℝ" : letter == "N" ? "ℕ" : letter == "Z" ? "ℤ" : letter == "Q" ? "ℚ" : letter == "C" ? "ℂ" : letter;
+                    o.Append(doubled);
+                    continue;
+                }
                 if (name == "frac" || name == "dfrac" || name == "tfrac") {
                     string top = TexArg(s, ref i), bottom = TexArg(s, ref i);
                     // A factor written right before the fraction (2rac{a}{b}) must not be read into its numerator.
@@ -892,6 +954,7 @@ static class Program
                     if (TexSymbols.TryGetValue(name, out symbol))
                     {
                         o.Append(symbol);
+                        if (symbol == "∑" || symbol == "∏" || symbol == "∫" || symbol == "∮") nary = true;
                         // A function name is applied to what follows: Word needs a space after it.
                         if (symbol.Length > 1 && symbol == name && i < s.Length && s[i] != ' ' && s[i] != '^' && s[i] != '_') o.Append(' ');
                     }
@@ -905,8 +968,8 @@ static class Program
                 bool braced = i < s.Length && s[i] == '{';
                 string arg = TexArg(s, ref i);
                 o.Append(c).Append(braced && arg.Length > 1 ? "(" + arg + ")" : arg);
-                // Otherwise Word reads the next letter into the script: x^2y.
-                if (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '\\')) o.Append(' ');
+                // A space ends the script; otherwise Word reads what follows into it: x^2y, λ_max(A).
+                if (!nary && i < s.Length && "^_ )]},.;:，。、".IndexOf(s[i]) < 0) o.Append(' ');
                 continue;
             }
             if (c == '{') { string group = TexArg(s, ref i); o.Append("〖" + group + "〗"); continue; }
@@ -934,6 +997,30 @@ static class Program
             System.Text.RegularExpressions.Match m = found[k];
             bool display = m.Groups[1].Success;
             string source = (display ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+            try
+            {
+                if (BuildOne(doc, range, start, m, display, source)) made++;
+                else MathFailed++;
+            }
+            catch (Exception) { MathFailed++; }
+        }
+        return made;
+    }
+
+    /// Formulas that could not be turned into equations during the current operation (they stay as text).
+    static int MathFailed;
+
+    static string MathNote()
+    {
+        if (MathFailed == 0) return "";
+        string note = " — NOTE " + MathFailed + " formula(s) could not be built and were left as text: check them with office_render and rewrite them more simply";
+        MathFailed = 0;
+        return note;
+    }
+
+    static bool BuildOne(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m, bool display, string source)
+    {
+        {
             // 	ag{1} numbers a display equation: Word sets "#(1)" flush right on the equation's line.
             string tag = null;
             System.Text.RegularExpressions.Match tagged = Tag.Match(source);
@@ -952,11 +1039,10 @@ static class Program
                 dynamic math = doc.OMaths.Add(spot);
                 math.OMaths[1].BuildUp();
                 if (display) { try { math.OMaths[1].Type = 0; math.OMaths[1].Justification = 1; } catch (COMException) { } }
-                made++;
+                return true;
             }
-            catch (COMException) { }
+            catch (COMException) { return false; }
         }
-        return made;
     }
 
     // ───────────────────────── Word ─────────────────────────
@@ -1132,6 +1218,9 @@ static class Program
         if (op.Has("spaceBefore")) range.ParagraphFormat.SpaceBefore = (float)op.Num("spaceBefore", 0);
         if (op.Has("spaceAfter")) range.ParagraphFormat.SpaceAfter = (float)op.Num("spaceAfter", 0);
         if (op.Has("lineSpacing")) { range.ParagraphFormat.LineSpacingRule = 5; range.ParagraphFormat.LineSpacing = (float)(op.Num("lineSpacing", 1) * 12); }
+        if (op.Has("indentChars")) { range.ParagraphFormat.FirstLineIndent = 0; range.ParagraphFormat.CharacterUnitFirstLineIndent = (float)op.Num("indentChars", 2); }
+        if (op.Has("superscript")) range.Font.Superscript = op.Flag("superscript", false) ? 1 : 0;
+        if (op.Has("subscript")) range.Font.Subscript = op.Flag("subscript", false) ? 1 : 0;
     }
 
     /// A new empty paragraph where an insert operation points: after / before paragraph "para", or at the start / end.
@@ -1311,22 +1400,34 @@ static class Program
             bool all = op.Flag("all", true), matchCase = op.Flag("matchCase", true);
             dynamic range = doc.Content;
             int count = 0;
-            while (count < 5000 && (bool)range.Find.Execute(FindText: find, MatchCase: matchCase, Forward: true, Wrap: 0))
+            // "^" starts a special code in Word's find box; here the text is always meant literally.
+            string literal = find.Replace("^", "^^");
+            bool rich = replace.IndexOf('$') >= 0 || replace.IndexOf("\\cite", StringComparison.Ordinal) >= 0;
+            string extra = "";
+            while (count < 5000 && (bool)range.Find.Execute(FindText: literal, MatchCase: matchCase, MatchWildcards: false, Forward: true, Wrap: 0))
             {
                 range.Text = replace;
-                range.Collapse(0);
+                if (rich)
+                {
+                    // Building formulas changes the length: keep the place by its distance from the end.
+                    int tail = (int)doc.Content.End - (int)range.End;
+                    extra = Enrich(doc, range);
+                    int resume = (int)doc.Content.End - tail;
+                    range = doc.Range(resume, resume);
+                }
+                else range.Collapse(0);
                 count++;
                 if (!all) break;
             }
             if (count == 0) throw new Fail("NOT_FOUND", "The text \"" + Clip(find, 60) + "\" does not occur in the document.");
-            return "replaced " + count;
+            return "replaced " + count + extra + Lint(replace);
         }
         if (type == "insert_paragraphs")
         {
             IList items = op.List("items");
             if (items == null) { items = new ArrayList(); items.Add(new Dictionary<string, object> { { "text", op.Need("text") } }); }
             dynamic current = null;
-            int made = 0, equations = 0;
+            int made = 0, equations = 0, cites = 0;
             string lint = "";
             foreach (object raw in items)
             {
@@ -1345,14 +1446,20 @@ static class Program
                     Write(doc, (int)p.Range.Start, text);
                     if (lint.Length == 0) lint = Lint(text);
                     Unnumber(p, text);
+                    try
+                    {
+                        if (Unnumbered.Count > 0 && Unnumbered.Contains((string)doc.FullName + "|" + (string)p.Style.NameLocal) && (int)p.Range.ListFormat.ListType != 0) p.Range.ListFormat.RemoveNumbers();
+                    }
+                    catch (Exception) { }
                     Whole(p.Range);
+                    cites += Cite(doc, p.Range);
                     equations += Mathify(doc, p.Range);
                     current = p;
                     made++;
                 }
             }
             int lastIndex = Index(doc, current);
-            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + lint;
+            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint;
         }
         if ((type == "set_text" || (type == "delete_range" && op.Has("para"))) && op.Raw("expect") == null)
         {
@@ -1366,8 +1473,8 @@ static class Program
             range.Text = "";
             Write(doc, (int)p.Range.Start, Lines(op.Raw("text") ?? ""));
             Whole(p.Range);
-            int built = Mathify(doc, p.Range);
-            return "paragraph " + op.Int("para", 0) + " rewritten" + (built > 0 ? ", " + built + " equation(s)" : "");
+            string built = Enrich(doc, p.Range);
+            return "paragraph " + op.Int("para", 0) + " rewritten" + built + Lint(Lines(op.Raw("text") ?? ""));
         }
         if (type == "format_text" || type == "set_style")
         {
@@ -1412,6 +1519,7 @@ static class Program
             catch (Exception) { }
             Plain(p, "Normal");
             Follow(doc, p.Range);
+            string cellLint = "";
             dynamic table = doc.Tables.Add(p.Range, rows, cols);
             // The cells take the formatting of the paragraph that follows (a heading, say): make them plain.
             SetStyle(table.Range, "Normal");
@@ -1446,7 +1554,8 @@ static class Program
                         dynamic cell = table.Cell(r + 1, c + 1).Range;
                         string value = Convert.ToString(cells[c], System.Globalization.CultureInfo.InvariantCulture);
                         cell.Text = value;
-                        if (value.IndexOf('$') >= 0) Mathify(doc, table.Cell(r + 1, c + 1).Range);
+                        if (value.IndexOf('$') >= 0 || value.IndexOf("\\cite", StringComparison.Ordinal) >= 0) Enrich(doc, table.Cell(r + 1, c + 1).Range);
+                        else if (cellLint.Length == 0) cellLint = Lint(value);
                     }
                     if (Typing) Thread.Sleep(25);
                 }
@@ -1469,7 +1578,7 @@ static class Program
             int tableEnd = (int)doc.Range(0, table.Range.End).Paragraphs.Count;
             bool nested = false;
             try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
-            return (nested ? "table inserted inside a cell of table " + (int)doc.Range(0, table.Range.End).Tables.Count : "table " + (int)doc.Range(0, table.Range.End).Tables.Count + " inserted") + " (" + rows + "×" + cols + "), now paragraphs " + (tableEnd - (int)table.Range.Paragraphs.Count + 1) + "–" + tableEnd + " of " + (int)doc.Paragraphs.Count;
+            return (nested ? "table inserted inside a cell of table " + (int)doc.Range(0, table.Range.End).Tables.Count : "table " + (int)doc.Range(0, table.Range.End).Tables.Count + " inserted") + " (" + rows + "×" + cols + "), now paragraphs " + (tableEnd - (int)table.Range.Paragraphs.Count + 1) + "–" + tableEnd + " of " + (int)doc.Paragraphs.Count + cellLint;
         }
         if (type == "set_cell")
         {
@@ -1479,8 +1588,8 @@ static class Program
             Follow(doc, cell.Range);
             cell.Range.Text = "";
             Write(doc, (int)cell.Range.Start, Lines(op.Raw("text") ?? ""));
-            int built = Mathify(doc, doc.Tables[n].Cell(op.Int("row", 1), op.Int("col", 1)).Range);
-            return "cell set" + (built > 0 ? ", " + built + " equation(s)" : "");
+            string built = Enrich(doc, doc.Tables[n].Cell(op.Int("row", 1), op.Int("col", 1)).Range);
+            return "cell set" + built + Lint(Lines(op.Raw("text") ?? ""));
         }
         if (type == "insert_image")
         {
@@ -1500,15 +1609,252 @@ static class Program
             else p.Range.ParagraphFormat.SpaceAfter = Air;
             return "image inserted";
         }
+        if (type == "insert_references") return References(doc, op);
+        if (type == "style_format") return StyleFormat(doc, op);
+        if (type == "page_setup") return PageSetup(doc, op);
+        if (type == "page_numbers") return PageNumbers(doc, op);
+        if (type == "insert_toc") return Toc(doc, op);
+        if (type == "page_break")
+        {
+            dynamic p = Para(doc, op.Int("para", 0), op.Str("expect", null));
+            p.Range.ParagraphFormat.PageBreakBefore = op.Flag("on", true) ? -1 : 0;
+            return "paragraph " + op.Int("para", 0) + " now starts a new page";
+        }
+        if (type == "header")
+        {
+            dynamic header = doc.Sections[1].Headers[1].Range;
+            header.Text = Lines(op.Raw("text") ?? "");
+            header.ParagraphFormat.Alignment = 1;
+            if (op.Has("size")) header.Font.Size = (float)op.Num("size", 9);
+            return "page header set";
+        }
+        if (type == "update_fields") { Refresh(doc); return "table of contents and cross-references refreshed"; }
         throw new Fail("BAD_ARGS", "Unknown Word operation \"" + type + "\".");
     }
 
     static Bag StyleLess(Bag source)
     {
         Dictionary<string, object> copy = new Dictionary<string, object>();
-        foreach (string key in new string[] { "font", "size", "bold", "italic", "underline", "color", "align", "firstLineIndent", "spaceBefore", "spaceAfter", "lineSpacing" })
+        foreach (string key in new string[] { "font", "size", "bold", "italic", "underline", "color", "align", "firstLineIndent", "spaceBefore", "spaceAfter", "lineSpacing", "indentChars", "superscript", "subscript" })
             if (source.Has(key)) copy[key] = source.Raw(key);
         return new Bag(copy);
+    }
+
+
+    // ───────────────────────── citations ─────────────────────────
+
+    static readonly System.Text.RegularExpressions.Regex Cites = new System.Text.RegularExpressions.Regex(@"\\cite\s*\{([0-9,\-–\s]+)\}");
+
+    /// One citation number at a position, as a superscript that jumps to the reference: a cross-reference field
+    /// when the reference list is already there, otherwise a link to the bookmark the list will bring.
+    static void CiteNumber(dynamic doc, int at, string number)
+    {
+        string mark = "cite_" + number;
+        dynamic spot = doc.Range(at, at);
+        if ((bool)doc.Bookmarks.Exists(mark))
+        {
+            // MERGEFORMAT keeps the superscript when the field is refreshed.
+            dynamic field = doc.Fields.Add(spot, -1, "REF " + mark + " \\h \\* MERGEFORMAT", false);
+            field.Result.Font.Superscript = 1;
+        }
+        else
+        {
+            dynamic link = doc.Hyperlinks.Add(Anchor: spot, Address: "", SubAddress: mark, TextToDisplay: number);
+            link.Range.Font.Superscript = 1;
+            link.Range.Font.Underline = 0;
+            link.Range.Font.Color = -16777216;
+        }
+    }
+
+    /// \cite{1}, \cite{2,5}, \cite{3-6} in a range become superscript [1], [2,5], [3-6] whose numbers jump to the references.
+    static int Cite(dynamic doc, dynamic range)
+    {
+        string text = (string)range.Text;
+        if (text == null || text.IndexOf("\\cite", StringComparison.Ordinal) < 0) return 0;
+        int made = 0;
+        System.Text.RegularExpressions.MatchCollection found = Cites.Matches(text);
+        for (int k = found.Count - 1; k >= 0; k--)
+        {
+            System.Text.RegularExpressions.Match m = found[k];
+            dynamic search = range.Duplicate;
+            if (!(bool)search.Find.Execute(FindText: m.Value, MatchCase: true, MatchWildcards: false, Forward: true, Wrap: 0)) continue;
+            int at = (int)search.Start;
+            search.Text = "";
+            // Written back to front at one position, so each piece lands before the one after it.
+            List<string> pieces = new List<string>();
+            pieces.Add("[");
+            foreach (string part in m.Groups[1].Value.Replace("–", "-").Replace(" ", "").Split(','))
+            {
+                if (part.Length == 0) continue;
+                if (pieces.Count > 1) pieces.Add(",");
+                string[] ends = part.Split('-');
+                pieces.Add("#" + ends[0]);
+                if (ends.Length > 1 && ends[1].Length > 0) { pieces.Add("-"); pieces.Add("#" + ends[1]); }
+            }
+            pieces.Add("]");
+            for (int p = pieces.Count - 1; p >= 0; p--)
+            {
+                string piece = pieces[p];
+                if (piece[0] == '#') { CiteNumber(doc, at, piece.Substring(1)); continue; }
+                doc.Range(at, at).InsertAfter(piece);
+                dynamic plain = doc.Range(at, at + piece.Length);
+                plain.Font.Superscript = 1;
+            }
+            made++;
+        }
+        return made;
+    }
+
+    /// Formulas and citations written in the text of a range.
+    static string Enrich(dynamic doc, dynamic range)
+    {
+        int cites = Cite(doc, range), equations = Mathify(doc, range);
+        return (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote();
+    }
+
+    /// The reference list: "[n] ..." paragraphs whose numbers carry the bookmarks the citations point at.
+    static string References(dynamic doc, Bag op)
+    {
+        IList items = op.List("items");
+        if (items == null || items.Count == 0) throw new Fail("BAD_ARGS", "\"items\" must list the references, one string each.");
+        System.Text.RegularExpressions.Regex lead = new System.Text.RegularExpressions.Regex(@"^\s*\[(\d+)\]\s*");
+        dynamic current = null;
+        int number = 0;
+        foreach (object raw in items)
+        {
+            string body = Convert.ToString(raw).Trim();
+            System.Text.RegularExpressions.Match m = lead.Match(body);
+            if (m.Success) { number = int.Parse(m.Groups[1].Value); body = body.Substring(m.Length); }
+            else number++;
+            dynamic p = current == null ? NewParagraph(doc, op) : After(doc, current);
+            Plain(p, "Normal");
+            Follow(doc, p.Range);
+            string label = "[" + number + "] ";
+            Write(doc, (int)p.Range.Start, label + body);
+            Whole(p.Range);
+            try
+            {
+                dynamic format = p.Range.ParagraphFormat;
+                format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; format.Alignment = 3;
+                format.CharacterUnitLeftIndent = 0; format.LeftIndent = 21f; format.FirstLineIndent = -21f;
+            }
+            catch (COMException) { }
+            int start = (int)p.Range.Start;
+            string mark = "cite_" + number;
+            if ((bool)doc.Bookmarks.Exists(mark)) doc.Bookmarks[mark].Delete();
+            doc.Bookmarks.Add(mark, doc.Range(start + 1, start + 1 + number.ToString().Length));
+            current = p;
+        }
+        // Citations written before the list existed are links; now that their targets exist, make them cross-references.
+        int linked = 0;
+        for (int i = (int)doc.Hyperlinks.Count; i >= 1; i--)
+        {
+            dynamic link = doc.Hyperlinks[i];
+            string target = "";
+            try { target = (string)link.SubAddress; } catch (Exception) { }
+            if (target == null || !target.StartsWith("cite_", StringComparison.Ordinal) || !(bool)doc.Bookmarks.Exists(target)) continue;
+            dynamic spot = link.Range;
+            int at = (int)spot.Start;
+            link.Delete();
+            dynamic text = doc.Range(at, at + target.Length - 5);
+            text.Text = "";
+            dynamic field = doc.Fields.Add(doc.Range(at, at), -1, "REF " + target + " \\h \\* MERGEFORMAT", false);
+            field.Result.Font.Superscript = 1;
+            linked++;
+        }
+        return items.Count + " reference(s) listed" + (linked > 0 ? ", " + linked + " citation(s) in the text now cross-reference them" : "");
+    }
+
+    // ───────────────────────── styles and page layout ─────────────────────────
+
+    /// Styles the agent switched automatic numbering off for (document path | style name).
+    static readonly HashSet<string> Unnumbered = new HashSet<string>();
+
+    static dynamic StyleOf(dynamic doc, string name)
+    {
+        int builtin;
+        try { return WordStyles.TryGetValue(name, out builtin) ? doc.Styles[builtin] : doc.Styles[name]; }
+        catch (COMException) { throw new Fail("STYLE_MISSING", "This document has no style \"" + name + "\". Built-in names that always work: " + string.Join(", ", new List<string>(WordStyles.Keys).ToArray()) + "."); }
+    }
+
+    /// Change what a style looks like, for every paragraph that uses it.
+    static string StyleFormat(dynamic doc, Bag op)
+    {
+        string name = op.Need("style");
+        dynamic style = StyleOf(doc, name);
+        dynamic font = style.Font, format = style.ParagraphFormat;
+        if (op.Has("font")) { string f = op.Need("font"); font.Name = f; try { font.NameFarEast = f; } catch (COMException) { } }
+        if (op.Has("latinFont")) { string f = op.Need("latinFont"); try { font.NameAscii = f; font.NameOther = f; } catch (COMException) { } }
+        if (op.Has("size")) font.Size = (float)op.Num("size", 12);
+        if (op.Has("bold")) font.Bold = op.Flag("bold", false) ? 1 : 0;
+        if (op.Has("italic")) font.Italic = op.Flag("italic", false) ? 1 : 0;
+        if (op.Has("color")) font.Color = Bgr(op.Need("color"));
+        if (op.Has("align")) { string align = op.Need("align"); format.Alignment = align == "center" ? 1 : align == "right" ? 2 : align == "justify" ? 3 : 0; }
+        if (op.Has("indentChars")) { format.FirstLineIndent = 0; format.CharacterUnitFirstLineIndent = (float)op.Num("indentChars", 2); }
+        if (op.Has("firstLineIndent")) { format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = (float)op.Num("firstLineIndent", 0); }
+        if (op.Has("spaceBefore")) format.SpaceBefore = (float)op.Num("spaceBefore", 0);
+        if (op.Has("spaceAfter")) format.SpaceAfter = (float)op.Num("spaceAfter", 0);
+        if (op.Has("lineSpacing")) { format.LineSpacingRule = 5; format.LineSpacing = (float)(op.Num("lineSpacing", 1) * 12); }
+        if (op.Has("pageBreakBefore")) format.PageBreakBefore = op.Flag("pageBreakBefore", false) ? -1 : 0;
+        if (op.Has("numbering") && !op.On("numbering"))
+        {
+            Unnumbered.Add((string)doc.FullName + "|" + (string)style.NameLocal);
+            // Stop the style from numbering its paragraphs by itself (headings that carry their number in the text).
+            try { style.LinkToListTemplate(null); } catch (Exception) { }
+            foreach (dynamic p in doc.Paragraphs)
+            {
+                try { if ((string)p.Style.NameLocal == (string)style.NameLocal && (int)p.Range.ListFormat.ListType != 0) p.Range.ListFormat.RemoveNumbers(); }
+                catch (Exception) { }
+            }
+        }
+        try { format.WordWrap = -1; } catch (Exception) { }
+        return "style \"" + (string)style.NameLocal + "\" changed";
+    }
+
+    static string PageSetup(dynamic doc, Bag op)
+    {
+        dynamic setup = doc.PageSetup;
+        const float cm = 28.3465f;
+        if (op.Has("paper")) { string paper = op.Need("paper").ToUpperInvariant(); setup.PaperSize = paper == "A3" ? 6 : paper == "LETTER" ? 2 : paper == "B5" ? 13 : 7; }
+        if (op.Has("orientation")) setup.Orientation = op.Need("orientation") == "landscape" ? 1 : 0;
+        if (op.Has("top")) setup.TopMargin = (float)op.Num("top", 2.54) * cm;
+        if (op.Has("bottom")) setup.BottomMargin = (float)op.Num("bottom", 2.54) * cm;
+        if (op.Has("left")) setup.LeftMargin = (float)op.Num("left", 3.17) * cm;
+        if (op.Has("right")) setup.RightMargin = (float)op.Num("right", 3.17) * cm;
+        return "page setup changed";
+    }
+
+    static string PageNumbers(dynamic doc, Bag op)
+    {
+        string align = op.Str("align", "center");
+        dynamic numbers = doc.Sections[1].Footers[1].PageNumbers;
+        numbers.Add(align == "left" ? 0 : align == "right" ? 2 : 1, op.Flag("firstPage", true));
+        if (op.Has("start")) { numbers.RestartNumberingAtSection = true; numbers.StartingNumber = op.Int("start", 1); }
+        return "page numbers added to the footer";
+    }
+
+    static string Toc(dynamic doc, Bag op)
+    {
+        dynamic p = NewParagraph(doc, op);
+        Plain(p, "Normal");
+        if (op.Has("title"))
+        {
+            p.Range.InsertBefore(op.Need("title"));
+            p.Range.ParagraphFormat.Alignment = 1; p.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; p.Range.ParagraphFormat.FirstLineIndent = 0;
+            p.Range.Font.Bold = 1; p.Range.Font.Size = 16f;
+            p = After(doc, p);
+            Plain(p, "Normal");
+        }
+        Follow(doc, p.Range);
+        doc.TablesOfContents.Add(Range: p.Range, UseHeadingStyles: true, UpperHeadingLevel: 1, LowerHeadingLevel: Math.Max(1, Math.Min(9, op.Int("levels", 3))));
+        return "table of contents inserted (it is refreshed on every save)";
+    }
+
+    /// Bring fields up to date: the table of contents, cross-references, caption numbers.
+    static void Refresh(dynamic doc)
+    {
+        try { foreach (dynamic toc in doc.TablesOfContents) toc.Update(); } catch (Exception) { }
+        try { doc.Fields.Update(); } catch (Exception) { }
     }
 
     // ───────────────────────── Excel ─────────────────────────
@@ -1821,7 +2167,7 @@ static class Program
     {
         if (!Typing || text.Length < 4) { textRange.Text = text; return; }
         textRange.Text = "";
-        foreach (string piece in Pieces(text)) { textRange.InsertAfter(piece); Thread.Sleep(22); }
+        foreach (string piece in Pieces(text)) { textRange.InsertAfter(piece); Thread.Sleep(14); }
     }
 
     static void GoTo(dynamic deck, int slide)
@@ -1937,6 +2283,7 @@ static class Program
                 {
                     Bag op = new Bag(ops[i]);
                     type = op.Need("op");
+                    if (card) Card.Hold = true;
                     if (card) Card.Report("AI 正在编辑 " + docName + (ops.Count > 1 ? " · " + (i + 1) + "/" + ops.Count : ""));
                     string line = kind == "word" ? WordOp(doc, type, op) : kind == "excel" ? ExcelOp(app, doc, type, op) : PptOp(doc, type, op);
                     string ignored = op.Unread();
@@ -1959,7 +2306,7 @@ static class Program
         {
             if (undo != null) { try { undo.EndCustomRecord(); } catch (COMException) { } }
         }
-        if (card) Card.Report(result.ContainsKey("failed") ? "AI 的修改停在第 " + (done.Count + 1) + " 项" : "AI 已改好 " + docName);
+        if (card) Card.Hold = false;
         result["done"] = done;
         result["total"] = ops.Count;
         return result;

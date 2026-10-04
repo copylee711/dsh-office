@@ -41,8 +41,8 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Scroll to where the AI is editing; off = silent, your view is left alone' },
   }),
   typing: z.boolean().default(true).volatile().i18n({
-    'zh-CN': { $description: '文字像打字一样逐步写出，而不是整块出现（每段最多约 1 秒）' },
-    'en-US': { $description: 'Write text progressively like typing instead of all at once (about a second per paragraph at most)' },
+    'zh-CN': { $description: '文字像打字一样逐步写出，而不是整块出现（每段约多花 0.3 秒）' },
+    'en-US': { $description: 'Write text progressively like typing instead of all at once (about 0.3 s more per paragraph)' },
   }),
   card: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: 'AI 编辑时在屏幕右下角显示迷你卡片，可随时开关“跟随”和“逐字”' },
