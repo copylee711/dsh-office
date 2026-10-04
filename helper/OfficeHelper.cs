@@ -1258,10 +1258,26 @@ static class Program
         if (op.Has("firstLineIndent")) range.ParagraphFormat.FirstLineIndent = (float)op.Num("firstLineIndent", 0);
         if (op.Has("spaceBefore")) range.ParagraphFormat.SpaceBefore = (float)op.Num("spaceBefore", 0);
         if (op.Has("spaceAfter")) range.ParagraphFormat.SpaceAfter = (float)op.Num("spaceAfter", 0);
-        if (op.Has("lineSpacing")) { range.ParagraphFormat.LineSpacingRule = 5; range.ParagraphFormat.LineSpacing = (float)(op.Num("lineSpacing", 1) * 12); }
+        if (op.Has("lineSpacing")) LineSpacing(range.ParagraphFormat, op.Raw("lineSpacing"));
         if (op.Has("indentChars")) { range.ParagraphFormat.FirstLineIndent = 0; range.ParagraphFormat.CharacterUnitFirstLineIndent = (float)op.Num("indentChars", 2); }
         if (op.Has("superscript")) range.Font.Superscript = op.Flag("superscript", false) ? 1 : 0;
         if (op.Has("subscript")) range.Font.Subscript = op.Flag("subscript", false) ? 1 : 0;
+    }
+
+    /// Line spacing as people state it: a plain number is a multiple of single spacing (1.5), a length is an exact
+    /// height ("20pt", "固定值20磅"), and "at least 20pt" / "最小值20磅" a minimum. A plain number too large to be a
+    /// multiple (5 and up) is taken as points.
+    static void LineSpacing(dynamic format, object raw)
+    {
+        string text = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture).Trim();
+        System.Text.RegularExpressions.Match number = System.Text.RegularExpressions.Regex.Match(text, @"\d+(\.\d+)?");
+        if (!number.Success) throw new Fail("BAD_ARGS", "lineSpacing \"" + text + "\" is not understood: give a multiple (1.5), an exact height (\"20pt\") or a minimum (\"at least 20pt\").");
+        float value = float.Parse(number.Value, System.Globalization.CultureInfo.InvariantCulture);
+        string lower = text.ToLowerInvariant();
+        bool least = lower.Contains("least") || lower.Contains("min") || text.Contains("最小");
+        bool points = least || lower.Contains("pt") || lower.Contains("exact") || lower.Contains("fixed") || text.Contains("磅") || text.Contains("固定") || value >= 5;
+        if (!points) { format.LineSpacingRule = 5; format.LineSpacing = value * 12; }
+        else { format.LineSpacingRule = least ? 3 : 4; format.LineSpacing = value; }
     }
 
     /// A new empty paragraph where an insert operation points: after / before paragraph "para", or at the start / end.
@@ -1835,7 +1851,7 @@ static class Program
         if (op.Has("firstLineIndent")) { format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = (float)op.Num("firstLineIndent", 0); }
         if (op.Has("spaceBefore")) format.SpaceBefore = (float)op.Num("spaceBefore", 0);
         if (op.Has("spaceAfter")) format.SpaceAfter = (float)op.Num("spaceAfter", 0);
-        if (op.Has("lineSpacing")) { format.LineSpacingRule = 5; format.LineSpacing = (float)(op.Num("lineSpacing", 1) * 12); }
+        if (op.Has("lineSpacing")) LineSpacing(format, op.Raw("lineSpacing"));
         if (op.Has("pageBreakBefore")) format.PageBreakBefore = op.Flag("pageBreakBefore", false) ? -1 : 0;
         if (op.Has("numbering") && !op.On("numbering"))
         {
