@@ -39,8 +39,24 @@ describe('which app a call is about', () => {
 })
 
 describe('office tools', () => {
-  it('registers the six tools', () => {
-    expect(setup(() => null).tools.map(tool => tool.name)).toEqual(['office_open', 'office_status', 'office_read', 'office_edit', 'office_render', 'office_save'])
+  it('closes only documents it opened itself, and not over unsaved changes', async () => {
+    let saved = false
+    const { calls, run } = setup(cmd => {
+      if (cmd === 'open') return { app: 'word', name: 'mine.docx', path: 'C:\\t\\mine.docx', saved: true, active: true, how: 'created' }
+      if (cmd === 'status') return [{ app: 'word', installed: true, running: true, documents: [{ app: 'word', name: 'mine.docx', path: 'C:\\t\\mine.docx', saved, active: true }] }]
+      return 'closed'
+    })
+    await expect(run('office_close', { doc: 'C:\\t\\theirs.docx' })).rejects.toThrow(/leave closing it to the user/)
+    await run('office_open', { path: 'C:\\t\\mine.docx' })
+    await expect(run('office_close', {})).rejects.toThrow(/unsaved changes/)
+    saved = true
+    expect((await run('office_close', {})).text).toBe('Closed mine.docx.')
+    expect(calls.at(-1)).toEqual({ cmd: 'close', args: { app: 'word', doc: 'C:\\t\\mine.docx', save: false } })
+    await expect(run('office_close', { doc: 'C:\\t\\mine.docx' })).rejects.toThrow(/leave closing/)
+  })
+
+  it('registers the tools', () => {
+    expect(setup(() => null).tools.map(tool => tool.name)).toEqual(['office_open', 'office_status', 'office_read', 'office_edit', 'office_render', 'office_save', 'office_close'])
   })
 
   it('opens by path and reports how', async () => {

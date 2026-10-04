@@ -94,15 +94,18 @@ const EDIT_GUIDE = `Edit a document that is open in Word, Excel or PowerPoint, l
 
 Word ops. para = paragraph number from office_read; pass expect = its first words so a number made stale by other edits is caught. where = after (default with para) | before | start | end (default without para: the very end of the document).
 In a form or template whose sections are table cells, write INSIDE the cell: give para = a paragraph of that cell. Without para the text or table lands after everything, outside the form.
-Formulas: write LaTeX between dollar signs in any text: $...$ inside a sentence, $$...$$ as a paragraph of its own. Number a display formula when the document numbers its formulas by ending it with \\tag{1}: $$T=2\\pi\\sqrt{l/g} \\tag{1}$$ puts (1) flush right. They become native Word equations (\\frac, \\sqrt, ^, _, Greek letters, \\bar, \\sum, \\int ...). Never write a formula as plain text such as T = 2π√(l/g).
+Formulas: write LaTeX between dollar signs in any text (paragraphs, table cells, captions, replace_text): $...$ inside a sentence, $$...$$ as a paragraph of its own. Every symbol, subscript, power, norm or matrix in running text goes between dollar signs too ($\\kappa(A)$, $\\|x\\|_2$, $10^{-8}$, \\begin{pmatrix}..\\end{pmatrix}, \\begin{cases}..\\end{cases}); do not type them with Unicode characters such as ‖x‖₂ or κ₂. Number a display formula when the document numbers its formulas by ending it with \\tag{1}: $$T=2\\pi\\sqrt{l/g} \\tag{1}$$ puts (1) flush right. They become native Word equations (\\frac, \\sqrt, ^, _, Greek letters, \\bar, \\sum, \\int ...). Never write a formula as plain text such as T = 2π√(l/g).
 - insert_paragraphs {items:[{text, style?}], para?, expect?, where?} — style: Normal, Title, Heading 1..6, List Bullet, List Number, Quote, or a style name the document has. Without style a paragraph is body text in the font, size and spacing of the text it is placed next to. A newline in text starts another paragraph. Items also take the format_text fields.
 - set_text {para, expect, text} — rewrite one paragraph, keeping its style. expect is required ("" for an empty paragraph).
-- replace_text {find, replace, all?}
-- format_text {para?, to?, find?, style?, font?, size?, bold?, italic?, underline?, color?, align?, firstLineIndent?, spaceBefore?, spaceAfter?, lineSpacing?} — para..to, or the first match of find.
+- replace_text {find, replace, all?} — find is literal text within one paragraph; replace may hold formulas and citations.
+- format_text {para?, to?, find?, style?, font?, size?, bold?, italic?, underline?, superscript?, subscript?, color?, align?, indentChars?, firstLineIndent?, spaceBefore?, spaceAfter?, lineSpacing?} — para..to, or the first match of find.
 - delete_range {para, expect, to?} — expect is required; para..to in one operation removes a run of paragraphs (leftover hints, surplus blank lines). Paragraph numbers shift after every insert or delete; each result tells you the new numbers.
 - insert_table {data:[[cell,..],..], caption?, para?, where?, header?} — with para inside a cell, the table goes inside that cell. set_cell {table, row, col, text}
 - Captions: give caption (the title only, no "表 1") on insert_table / insert_image. It is set the standard way: numbered automatically ("表 1", "图 1"), centred, above a table and below a figure. Do not write captions as ordinary paragraphs.
 - insert_image {path, caption?, para?, where?, width?} — the picture is centred on a line of its own.
+- Citations: write \\cite{1}, \\cite{2,5} or \\cite{3-6} in the text where the source is used; they become superscript [1] that jump to the reference. List the sources with insert_references {items:["Author. Title[M]. ...", ..], para?, where?} (numbered [1], [2].. in order; put it under a "参考文献" heading). Do not type [1] by hand.
+- style_format {style, font?, latinFont?, size?, bold?, italic?, color?, align?, indentChars?, spaceBefore?, spaceAfter?, lineSpacing?, pageBreakBefore?, numbering?: false} — change what a style looks like everywhere it is used (e.g. Heading 1 in 黑体 三号 without automatic numbers; Normal in 宋体 小四, 1.5 lines, 2-character first-line indent). Set the styles first, then write; this replaces fiddling with Word's style dialogs.
+- page_setup {paper?: A4|A3|B5|Letter, orientation?, top?, bottom?, left?, right?} (margins in cm); page_numbers {align?, start?}; header {text}; page_break {para, expect} (that paragraph starts a new page); insert_toc {title?, levels?, para?, where?}; update_fields {}
 
 Excel ops. sheet = sheet name (default: the active sheet).
 - write_range {range: top-left cell, values:[[..],..]} — a string starting with "=" is a formula; also takes the format_range fields.
@@ -127,6 +130,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   // The document a call without doc / app is about: the one this plugin last opened or worked on.
   let current: { app: AppKind; doc?: string } | undefined
+  // Documents this plugin opened or created itself; only these may be closed by the agent.
+  const own = new Set<string>()
   // Documents edited since the model last looked at a picture of them.
   const unseen = new Set<string>()
   const keyOf = (on: { app: AppKind; doc?: string }): string => `${on.app}:${fileName(on.doc).toLowerCase()}`
@@ -208,6 +213,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const { showOnOpen, follow, typing, card } = host.settings()
       const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: showOnOpen, follow, typing, card }, 80_000)
       current = { app: kind, doc: doc.path ?? doc.name }
+      if (doc.how !== 'attached') own.add(keyOf(current))
       return { text: formatOpened(doc) }
     },
     presentCall: args => card(`打开 ${fileName((args as { path?: string }).path) || '新文档'}`),
@@ -336,7 +342,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       // Saved under a new name, the open document IS that file now; a PDF is only an export.
       const moved = input.path !== undefined && extname(input.path).toLowerCase() !== '.pdf'
       const wasUnseen = unseen.delete(keyOf(on))
-      if (moved) current = { app: on.app, doc: result.path }
+      if (moved) { if (own.delete(keyOf(on))) own.add(keyOf({ app: on.app, doc: result.path })); current = { app: on.app, doc: result.path } }
       const text = `Saved ${result.path} (${result.bytes} bytes).${moved ? ' The open document is now this file.' : ''}`
       // The whole-document check before delivery: the model has edited since it last looked, so it is shown the result.
       if (!wasUnseen || !host.settings().finalCheck || !await host.vision(exec)) return { text }
@@ -353,6 +359,34 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
     },
     presentCall: args => card(`保存 ${fileName((args as { path?: string }).path ?? (args as Target).doc) || '当前文档'}`),
+  }))
+
+  tools.push(defineTool({
+    name: 'office_close',
+    description: 'Close a document that YOU opened or created with office_open (a scratch file, a source you are done with). Documents the user already had open are theirs and are refused. Unsaved changes are refused unless you pass save.',
+    parameters: {
+      doc: DOC,
+      app: APP,
+      save: { type: 'boolean', description: 'true: save and close. false: close and drop unsaved changes.' },
+    },
+    output,
+    timeoutMs: 60_000,
+    async execute(args): Promise<Value> {
+      const input = args as Target & { save?: boolean }
+      const on = target(input)
+      if (!own.has(keyOf(on))) throw new Error('This document was open before you came to it, or was not opened by you: leave closing it to the user.')
+      if (input.save === undefined) {
+        const apps = await helper.call<AppStatus[]>('status', {}, 30_000)
+        const info = apps.flatMap(app => app.documents).find(doc => doc.app === on.app && fileName(doc.path ?? doc.name).toLowerCase() === fileName(on.doc).toLowerCase())
+        if (info && !info.saved) throw new Error('It has unsaved changes: pass save: true to keep them or save: false to drop them.')
+      }
+      await helper.call('close', { ...on, save: input.save === true }, 50_000)
+      own.delete(keyOf(on))
+      unseen.delete(keyOf(on))
+      if (current && keyOf(current) === keyOf(on)) current = undefined
+      return { text: `Closed ${fileName(on.doc)}.` }
+    },
+    presentCall: args => card(`关闭 ${fileName((args as Target).doc) || '文档'}`),
   }))
 
   return tools
