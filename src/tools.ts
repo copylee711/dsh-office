@@ -5,7 +5,10 @@
  */
 import { mkdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { extname, isAbsolute, join } from 'node:path'
+import { join, win32 } from 'node:path'
+
+// Office paths are Windows paths whatever platform this module is loaded on (the tests run on Linux too).
+const { extname, isAbsolute } = win32
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { APP_NAMES, formatEdit, formatExcel, formatOpened, formatPpt, formatStatus, formatWord, type AppKind, type AppStatus, type DocInfo, type EditResult, type ExcelRead, type PptRead, type WordRead } from './format.js'

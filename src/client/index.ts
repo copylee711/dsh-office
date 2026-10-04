@@ -8,6 +8,7 @@
 import * as React from 'react'
 import { DEFAULTS, ENTRY_ID, resolveConfig, type Settings } from '../settings.js'
 import { ACCENT, ACCENT_INK, AccentPicker, installAccent } from './accent.js'
+import { registerNavIcon } from './nav-icon.js'
 
 const STATUS_ROUTE = '/api/dsh-office/status'
 
@@ -176,6 +177,7 @@ export const inject = ['slots', 'remote', 'remote.settings']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => installAccent(), 'office: accent colour')
+  ctx.effect(() => registerNavIcon('Office'), 'office: settings nav icon')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: ENTRY_ID,
