@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { HelperLike } from '../src/helper-client.js'
 import { DEFAULTS } from '../src/settings.js'
@@ -54,7 +55,7 @@ describe('office tools', () => {
     const ops = [{ op: 'set_text', para: 2, expect: '旧', text: '新' }, { op: 'replace_text', find: 'a', replace: 'b' }, { op: 'delete_range', para: 9 }]
     const { calls, run } = setup(() => ({ done: ['paragraph 2 rewritten'], total: 3, failed: { index: 1, op: 'replace_text', code: 'NOT_FOUND', error: 'The text "a" does not occur in the document.' } }))
     const result = await run('office_edit', { doc: 'C:\\t\\a.docx', ops })
-    expect(calls[0]).toEqual({ cmd: 'edit', args: { app: 'word', doc: 'C:\\t\\a.docx', ops } })
+    expect(calls[0]).toEqual({ cmd: 'edit', args: { app: 'word', doc: 'C:\\t\\a.docx', ops, follow: true, typing: true, card: true } })
     expect(result.text).toContain('Stopped at operation 2 (replace_text): The text "a" does not occur')
     expect(result.text).toContain('1. paragraph 2 rewritten')
     expect(result.text).toContain('The 1 operation(s) after it did not run.')
@@ -66,6 +67,51 @@ describe('office tools', () => {
     const result = await run('office_save', { doc: 'a.docx', path: 'C:\\t\\a.pdf' })
     expect(calls[0]!.args).toEqual({ app: 'word', doc: 'a.docx', path: 'C:\\t\\a.pdf' })
     expect(result.text).toBe('Saved C:\\t\\a.pdf (1234 bytes).')
+  })
+
+  it('keeps working on the new file after a save-as', async () => {
+    const { calls, run } = setup(cmd => cmd === 'save' ? { path: 'C:\\t\\new.docx', bytes: 5 } : { paragraphs: 1, tables: 0, items: [] })
+    const saved = await run('office_save', { doc: 'C:\\t\\template.docx', path: 'C:\\t\\new.docx' })
+    expect(saved.text).toContain('The open document is now this file.')
+    await run('office_read', {})
+    expect(calls[1]!.args).toEqual({ app: 'word', doc: 'C:\\t\\new.docx' })
+  })
+
+  it('shows the pages on save when the model edited after it last looked', async () => {
+    const { calls, run } = setup((cmd, args) => {
+      if (cmd === 'edit') return { done: ['formatted'], total: 1 }
+      if (cmd === 'save') return { path: 'C:\\t\\a.docx', bytes: 7 }
+      if (cmd === 'render') {
+        if (Number(args.page) > 2) throw new Error('There is no page 3 (the document has 2).')
+        writeFileSync(String(args.out), 'png')
+        return { what: `page ${String(args.page)} of 2`, width: 800, height: 1100 }
+      }
+      return null
+    })
+    await run('office_edit', { doc: 'C:\\t\\a.docx', ops: [{ op: 'format_text', para: 1, bold: true }] })
+    const first = await run('office_save', {}) as { text: string; image?: unknown; more?: unknown[] }
+    expect(first.text).toContain('Final check')
+    expect(first.text).toContain('2 page(s)')
+    expect(first.image).toBeDefined()
+    expect(first.more).toHaveLength(1)
+    expect(calls.filter(call => call.cmd === 'render').map(call => call.args.page)).toEqual([1, 2])
+    // Nothing changed since: a second save is just a save.
+    const second = await run('office_save', {})
+    expect(second.text).toBe('Saved C:\\t\\a.docx (7 bytes).')
+  })
+
+  it('pictures several pages in one call and stops at the last page', async () => {
+    let page = 0
+    const { calls, run } = setup((cmd, args) => {
+      if (cmd !== 'render') return null
+      if (++page > 2) throw new Error('There is no page 3 (the document has 2).')
+      writeFileSync(String(args.out), 'png')
+      return { what: `page ${page} of 2`, width: 10, height: 20 }
+    })
+    const result = await run('office_render', { doc: 'a.docx', page: 1, to: 4 }).catch(error => ({ text: String(error) }))
+    // Once the first picture says how many pages there are, pages past the end are not asked for.
+    expect(calls.map(call => call.args.page)).toEqual([1, 2])
+    expect(result.text).toMatch(/page 1 of 2[\s\S]*page 2 of 2/)
   })
 
   it('works on the document last opened when a call names none', async () => {
