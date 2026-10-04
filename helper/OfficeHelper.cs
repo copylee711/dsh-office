@@ -803,7 +803,7 @@ static class Program
         { "Sigma", "Σ" }, { "Phi", "Φ" }, { "Psi", "Ψ" }, { "Omega", "Ω" },
         { "cdot", "⋅" }, { "times", "×" }, { "div", "÷" }, { "pm", "±" }, { "mp", "∓" }, { "approx", "≈" }, { "neq", "≠" }, { "ne", "≠" },
         { "leq", "≤" }, { "le", "≤" }, { "geq", "≥" }, { "ge", "≥" }, { "ll", "≪" }, { "gg", "≫" }, { "equiv", "≡" }, { "propto", "∝" }, { "sim", "∼" },
-        { "infty", "∞" }, { "partial", "∂" }, { "nabla", "∇" }, { "sum", "∑" }, { "prod", "∏" }, { "int", "∫" }, { "oint", "∮" },
+        { "infty", "∞" }, { "partial", "∂" }, { "nabla", "∇" }, { "sum", "∑" }, { "prod", "∏" }, { "int", "∫" }, { "oint", "∮" }, { "iint", "∬" }, { "iiint", "∭" }, { "oiint", "∯" },
         { "to", "→" }, { "rightarrow", "→" }, { "leftarrow", "←" }, { "Rightarrow", "⇒" }, { "Leftrightarrow", "⇔" }, { "in", "∈" }, { "notin", "∉" },
         { "subset", "⊂" }, { "cup", "∪" }, { "cap", "∩" }, { "forall", "∀" }, { "exists", "∃" }, { "angle", "∠" }, { "perp", "⊥" }, { "parallel", "∥" },
         { "circ", "∘" }, { "degree", "°" }, { "ldots", "…" }, { "cdots", "⋯" }, { "dots", "…" }, { "prime", "′" }, { "hbar", "ℏ" }, { "ell", "ℓ" },
@@ -855,13 +855,22 @@ static class Program
     {
         StringBuilder o = new StringBuilder();
         int i = 0;
+        // Integral signs written one after another are one multiple integral.
+        if (s.IndexOf("\\int", StringComparison.Ordinal) >= 0)
+        {
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"\\int(?:\s|\\!)*\\int(?:\s|\\!)*\\int(?![a-zA-Z])", "\\iiint");
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"\\int(?:\s|\\!)*\\int(?![a-zA-Z])", "\\iint");
+        }
         // A sum, product or integral was written and its limits may still follow; what comes after them is its
         // operand, which Word's linear format introduces with "▒" (left out, Word draws an empty box there).
         bool nary = false;
         while (i < s.Length)
         {
             char c = s[i];
-            if (nary && c != '^' && c != '_' && c != ' ')
+            // Nothing may stand between the limits and "▒": a space there ends the operator with an empty operand.
+            if (nary && c == ' ') { i++; continue; }
+            if (nary && c == '\\' && i + 1 < s.Length && ",;:! ".IndexOf(s[i + 1]) >= 0) { i += 2; continue; }
+            if (nary && c != '^' && c != '_')
             {
                 if (c == '\\' && string.CompareOrdinal(s, i, "\\limits", 0, 7) == 0) { i += 7; continue; }
                 if (c == '\\' && string.CompareOrdinal(s, i, "\\nolimits", 0, 9) == 0) { i += 9; continue; }
@@ -953,8 +962,10 @@ static class Program
                     string symbol;
                     if (TexSymbols.TryGetValue(name, out symbol))
                     {
+                        // A function name right after a letter (r\cos u) would be read as one word with it.
+                        if (symbol.Length > 1 && symbol == name && o.Length > 0 && char.IsLetter(o[o.Length - 1])) o.Append(' ');
                         o.Append(symbol);
-                        if (symbol == "∑" || symbol == "∏" || symbol == "∫" || symbol == "∮") nary = true;
+                        if (symbol == "∑" || symbol == "∏" || symbol == "∫" || symbol == "∮" || symbol == "∬" || symbol == "∭" || symbol == "∯") nary = true;
                         // A function name is applied to what follows: Word needs a space after it.
                         if (symbol.Length > 1 && symbol == name && i < s.Length && s[i] != ' ' && s[i] != '^' && s[i] != '_') o.Append(' ');
                     }
