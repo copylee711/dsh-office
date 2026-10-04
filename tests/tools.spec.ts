@@ -82,19 +82,21 @@ describe('office tools', () => {
       if (cmd === 'edit') return { done: ['formatted'], total: 1 }
       if (cmd === 'save') return { path: 'C:\\t\\a.docx', bytes: 7 }
       if (cmd === 'render') {
-        if (Number(args.page) > 2) throw new Error('There is no page 3 (the document has 2).')
         writeFileSync(String(args.out), 'png')
-        return { what: `page ${String(args.page)} of 2`, width: 800, height: 1100 }
+        const from = Number(args.from), last = Math.min(8, Number(args.to))
+        return { what: `pages ${from}–${last} of 8`, total: 8, width: 1962, height: 1900 }
       }
       return null
     })
     await run('office_edit', { doc: 'C:\\t\\a.docx', ops: [{ op: 'format_text', para: 1, bold: true }] })
     const first = await run('office_save', {}) as { text: string; image?: unknown; more?: unknown[] }
     expect(first.text).toContain('Final check')
-    expect(first.text).toContain('2 page(s)')
+    expect(first.text).toContain('pages 1–6 of 8')
+    expect(first.text).toContain('pages 7–8 of 8')
     expect(first.image).toBeDefined()
     expect(first.more).toHaveLength(1)
-    expect(calls.filter(call => call.cmd === 'render').map(call => call.args.page)).toEqual([1, 2])
+    // Eight pages arrive as two tiled pictures, not eight.
+    expect(calls.filter(call => call.cmd === 'render').map(call => [call.args.sheet, call.args.from, call.args.to])).toEqual([[true, 1, 6], [true, 7, 12]])
     // Nothing changed since: a second save is just a save.
     const second = await run('office_save', {})
     expect(second.text).toBe('Saved C:\\t\\a.docx (7 bytes).')

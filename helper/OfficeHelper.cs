@@ -68,6 +68,16 @@ class Bag
         object v = Raw(key);
         return v is bool ? (bool)v : fallback;
     }
+    /// A switch given loosely: true, "thin", "all", 1 are on; false, "none", "off", 0 and absent are off.
+    public bool On(string key)
+    {
+        object v = Raw(key);
+        if (v == null) return false;
+        if (v is bool) return (bool)v;
+        string text = Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture).Trim().ToLowerInvariant();
+        return text.Length > 0 && text != "false" && text != "none" && text != "off" && text != "no" && text != "0";
+    }
+
     public IList List(string key)
     {
         object v = Raw(key);
@@ -215,7 +225,8 @@ class Card : Form
         {
             int right = Width - S(10);
             Chip(g, font, "逐字", Program.Typing, ref right, out typingBox);
-            Chip(g, font, "跟随", Program.Following && Watching(), ref right, out followBox);
+            bool following = Program.Following && Watching();
+            Chip(g, font, following ? "跟随中" : "跟随", following, ref right, out followBox);
             using (SolidBrush dot = new SolidBrush(Color.FromArgb(217, 119, 87))) g.FillEllipse(dot, S(12), (Height - S(8)) / 2, S(8), S(8));
             Rectangle text = new Rectangle(S(26), 0, right - S(30), Height);
             TextRenderer.DrawText(g, line, font, text, Color.FromArgb(235, 235, 240), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -1147,6 +1158,37 @@ static class Program
         return doc.Range(start, start).Paragraphs[1];
     }
 
+    static readonly System.Text.RegularExpressions.Regex Numbered = new System.Text.RegularExpressions.Regex(@"^\s*(第?[一二三四五六七八九十百]+[、．.章节]|[（(][一二三四五六七八九十\d]+[)）]|\d+(\.\d+)*[\s、．.])");
+
+    static readonly System.Text.RegularExpressions.Regex PlainMath = new System.Text.RegularExpressions.Regex(@"[A-Za-z0-9\)\}]_(\{[^}]+\}|[A-Za-z0-9])|[A-Za-z0-9\)]\^(\{[^}]+\}|\(?-?\d)|\\(frac|sqrt|sum|int|alpha|beta|theta|pi)\b");
+
+    /// Subscripts and powers written as plain text (d_k, 10^18) outside $...$: say so, with the first one found.
+    static string Lint(string text)
+    {
+        if (text == null) return "";
+        string outside = Dollars.Replace(text, " ");
+        System.Text.RegularExpressions.Match m = PlainMath.Match(outside);
+        if (!m.Success) return "";
+        int start = Math.Max(0, m.Index - 6);
+        return " — NOTE plain-text formula \"" + outside.Substring(start, Math.Min(outside.Length - start, m.Length + 12)).Trim() + "\": write formulas, subscripts and powers between dollar signs ($d_k$, $10^{18}$) so they are typeset";
+    }
+
+    /// Keep Latin words and numbers whole at the end of a line. Some templates carry "allow Latin text to wrap in
+    /// the middle of a word" in a style, and every paragraph written after it inherits that: 37 / 000, mode / l.
+    /// (Word's object model names this backwards: WordWrap = True is the whole-word setting.)
+    static void Whole(dynamic range)
+    {
+        try { range.ParagraphFormat.WordWrap = -1; } catch (Exception) { }
+    }
+
+    /// The text already starts with its number ("一、", "2.1 ") and the style would add another: drop the automatic one.
+    static void Unnumber(dynamic paragraph, string text)
+    {
+        if (!Numbered.IsMatch(text)) return;
+        try { if ((int)paragraph.Range.ListFormat.ListType != 0) paragraph.Range.ListFormat.RemoveNumbers(); }
+        catch (Exception) { }
+    }
+
     /// A new empty paragraph right after the given one.
     static dynamic After(dynamic doc, dynamic paragraph)
     {
@@ -1158,8 +1200,27 @@ static class Program
         try
         {
             made.Style = paragraph.Style;
-            made.Range.ParagraphFormat = paragraph.Range.ParagraphFormat.Duplicate;
-            made.Range.Font = paragraph.Range.Font.Duplicate;
+            dynamic from = paragraph.Range.ParagraphFormat, to = made.Range.ParagraphFormat;
+            to.Alignment = from.Alignment;
+            to.LeftIndent = from.LeftIndent; to.RightIndent = from.RightIndent;
+            to.CharacterUnitFirstLineIndent = from.CharacterUnitFirstLineIndent; to.FirstLineIndent = from.FirstLineIndent;
+            to.SpaceBefore = from.SpaceBefore; to.SpaceAfter = from.SpaceAfter;
+            to.LineSpacingRule = from.LineSpacingRule;
+            if ((int)from.LineSpacingRule >= 3) to.LineSpacing = from.LineSpacing;
+            dynamic font = paragraph.Range.Font, target = made.Range.Font;
+            // 9999999 / empty mean "mixed" in the source paragraph: leave those to the style.
+            string name = (string)font.Name, farEast = (string)font.NameFarEast;
+            if (!string.IsNullOrEmpty(name)) target.Name = name;
+            if (!string.IsNullOrEmpty(farEast)) target.NameFarEast = farEast;
+            float size = (float)font.Size;
+            if (size > 0 && size < 1000) target.Size = size;
+            foreach (string flag in new string[] { "Bold", "Italic" })
+            {
+                int value = flag == "Bold" ? (int)font.Bold : (int)font.Italic;
+                if (value == 0 || value == -1) { if (flag == "Bold") target.Bold = value; else target.Italic = value; }
+            }
+            int color = (int)font.Color;
+            if (color != 9999999) target.Color = color;
         }
         catch (COMException) { }
         return made;
@@ -1199,10 +1260,13 @@ static class Program
         {
             dynamic range = caption.Range;
             range.ParagraphFormat.Alignment = 1;
+            Whole(range);
             range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; range.ParagraphFormat.FirstLineIndent = 0;
             range.Font.Bold = 0; range.Font.Italic = 0; range.Font.Color = -16777216; range.Font.Size = 10.5f;
             if (!string.IsNullOrEmpty(fontName)) range.Font.Name = fontName;
             if (!string.IsNullOrEmpty(fontFarEast)) range.Font.NameFarEast = fontFarEast;
+            // A table's caption must not be left alone at the foot of a page.
+            if (table) range.ParagraphFormat.KeepWithNext = -1;
             range.ParagraphFormat.SpaceBefore = table ? Air : 3f;
             range.ParagraphFormat.SpaceAfter = table ? 3f : Air;
             Mathify(doc, caption.Range);
@@ -1263,6 +1327,7 @@ static class Program
             if (items == null) { items = new ArrayList(); items.Add(new Dictionary<string, object> { { "text", op.Need("text") } }); }
             dynamic current = null;
             int made = 0, equations = 0;
+            string lint = "";
             foreach (object raw in items)
             {
                 Bag item = raw is string ? new Bag(new Dictionary<string, object> { { "text", raw } }) : new Bag(raw);
@@ -1278,13 +1343,16 @@ static class Program
                     WordFormat(p.Range, StyleLess(item));
                     Follow(doc, p.Range);
                     Write(doc, (int)p.Range.Start, text);
+                    if (lint.Length == 0) lint = Lint(text);
+                    Unnumber(p, text);
+                    Whole(p.Range);
                     equations += Mathify(doc, p.Range);
                     current = p;
                     made++;
                 }
             }
             int lastIndex = Index(doc, current);
-            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "");
+            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + lint;
         }
         if ((type == "set_text" || (type == "delete_range" && op.Has("para"))) && op.Raw("expect") == null)
         {
@@ -1297,6 +1365,7 @@ static class Program
             range.MoveEnd(1, -1);
             range.Text = "";
             Write(doc, (int)p.Range.Start, Lines(op.Raw("text") ?? ""));
+            Whole(p.Range);
             int built = Mathify(doc, p.Range);
             return "paragraph " + op.Int("para", 0) + " rewritten" + (built > 0 ? ", " + built + " equation(s)" : "");
         }
@@ -1359,6 +1428,7 @@ static class Program
                 if (!string.IsNullOrEmpty(fontFarEast)) table.Range.Font.NameFarEast = fontFarEast;
                 if (fontSize > 4 && fontSize < 100) table.Range.Font.Size = fontSize;
                 table.Range.ParagraphFormat.Alignment = 1;
+                Whole(table.Range);
                 table.Range.Cells.VerticalAlignment = 1;
             }
             catch (COMException) { }
@@ -1381,7 +1451,13 @@ static class Program
                     if (Typing) Thread.Sleep(25);
                 }
             }
-            if (op.Flag("header", true)) table.Rows[1].Range.Font.Bold = 1;
+            if (op.Flag("header", true))
+            {
+                table.Rows[1].Range.Font.Bold = 1;
+                // On a page break the header row is repeated at the top of the next page.
+                try { table.Rows[1].HeadingFormat = -1; } catch (COMException) { }
+            }
+            try { table.Rows.AllowBreakAcrossPages = 0; } catch (COMException) { }
             if (op.Has("caption")) Caption(doc, table.Range, true, op.Need("caption"), fontName, fontFarEast);
             else
             {
@@ -1557,8 +1633,8 @@ static class Program
             range.HorizontalAlignment = align == "center" ? -4108 : align == "right" ? -4152 : -4131;
         }
         if (op.Has("wrap")) range.WrapText = op.Flag("wrap", false);
-        if (op.Flag("border", false)) range.Borders.LineStyle = 1;
-        if (op.Flag("merge", false)) range.Merge();
+        if (op.On("border")) range.Borders.LineStyle = 1;
+        if (op.On("merge")) range.Merge();
         if (op.Has("columnWidth")) range.ColumnWidth = op.Num("columnWidth", 10);
         if (op.Has("rowHeight")) range.RowHeight = op.Num("rowHeight", 15);
     }
@@ -1891,8 +1967,97 @@ static class Program
 
     // ───────────────────────── rendering ─────────────────────────
 
+    /// One Word page as a picture of the given width.
+    static Bitmap WordPage(dynamic pages, int page, int width)
+    {
+        byte[] bits = (byte[])pages[page].EnhMetaFileBits;
+        using (MemoryStream stream = new MemoryStream(bits))
+        using (Metafile meta = new Metafile(stream))
+        {
+            int height = (int)Math.Round(width * (double)meta.Height / meta.Width);
+            // Drawn straight at the final size, hairlines (table borders) fall between pixels and vanish:
+            // draw the page large first, then scale the picture down.
+            int factor = Math.Max(2, (int)Math.Ceiling(3000.0 / width));
+            Bitmap bitmap = new Bitmap(width, height);
+            using (Bitmap large = new Bitmap(width * factor, height * factor))
+            {
+                using (Graphics g = Graphics.FromImage(large))
+                {
+                    g.Clear(Color.White);
+                    g.DrawImage(meta, 0, 0, large.Width, large.Height);
+                }
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(large, 0, 0, width, height);
+                }
+            }
+            return bitmap;
+        }
+    }
+
+    /// Several pages or slides side by side in one picture, each with its number: the whole document at a glance.
+    static object Sheet(string kind, dynamic doc, Bag a)
+    {
+        string path = a.Need("out");
+        int cell = Math.Max(300, Math.Min(1000, a.Int("width", 640)));
+        dynamic pages = kind == "word" ? doc.Windows[1].Panes[1].Pages : null;
+        int total = kind == "word" ? (int)pages.Count : (int)doc.Slides.Count;
+        if (total == 0) throw new Fail("ANCHOR_MISSING", "There is nothing to picture yet.");
+        int first = Math.Max(1, a.Int("from", 1)), last = Math.Min(total, a.Int("to", total));
+        if (first > total) throw new Fail("ANCHOR_MISSING", "There is no " + (kind == "word" ? "page " : "slide ") + first + " (there are " + total + ").");
+        last = Math.Min(last, first + 11);
+        int count = last - first + 1, columns = Math.Min(count, kind == "word" ? 3 : 2), rows = (count + columns - 1) / columns;
+        List<Bitmap> pictures = new List<Bitmap>();
+        string temp = path + ".slide.png";
+        try
+        {
+            for (int n = first; n <= last; n++)
+            {
+                if (kind == "word") pictures.Add(WordPage(pages, n, cell));
+                else
+                {
+                    double ratio = (double)doc.PageSetup.SlideHeight / (double)doc.PageSetup.SlideWidth;
+                    doc.Slides[n].Export(temp, "PNG", cell, (int)Math.Round(cell * ratio));
+                    using (Image loaded = Image.FromFile(temp)) pictures.Add(new Bitmap(loaded));
+                }
+            }
+            int gap = 14, label = 30, height = 0;
+            foreach (Bitmap picture in pictures) height = Math.Max(height, picture.Height);
+            using (Bitmap sheet = new Bitmap(columns * cell + (columns + 1) * gap, rows * (height + label + gap) + gap))
+            {
+                using (Graphics g = Graphics.FromImage(sheet))
+                using (Font font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (Pen border = new Pen(Color.FromArgb(150, 150, 150)))
+                {
+                    g.Clear(Color.FromArgb(232, 232, 236));
+                    for (int k = 0; k < pictures.Count; k++)
+                    {
+                        int x = gap + (k % columns) * (cell + gap), y = gap + (k / columns) * (height + label + gap);
+                        g.DrawString((kind == "word" ? "page " : "slide ") + (first + k), font, Brushes.Black, x, y + 4);
+                        g.DrawImage(pictures[k], x, y + label);
+                        g.DrawRectangle(border, x, y + label, pictures[k].Width - 1, pictures[k].Height - 1);
+                    }
+                }
+                sheet.Save(path, ImageFormat.Png);
+            }
+        }
+        finally
+        {
+            foreach (Bitmap picture in pictures) picture.Dispose();
+            try { File.Delete(temp); } catch (Exception) { }
+        }
+        Dictionary<string, object> result = new Dictionary<string, object>();
+        result["what"] = (kind == "word" ? "pages " : "slides ") + first + "–" + last + " of " + total;
+        result["first"] = first; result["last"] = last; result["total"] = total;
+        result["path"] = path;
+        using (Image saved = Image.FromFile(path)) { result["width"] = saved.Width; result["height"] = saved.Height; }
+        return result;
+    }
+
     static object Render(string kind, dynamic app, dynamic doc, Bag a)
     {
+        if (a.Flag("sheet", false) && kind != "excel") return Sheet(kind, doc, a);
         string path = a.Need("out");
         int width = Math.Max(320, Math.Min(2400, a.Int("width", 1100)));
         Dictionary<string, object> result = new Dictionary<string, object>();
