@@ -1,9 +1,23 @@
+/** The host's file-based Office skills, and the app each one stands in for. */
+export const FILE_SKILLS: Record<string, 'word' | 'excel' | 'ppt'> = { 'office-docx': 'word', 'office-xlsx': 'excel', 'office-pptx': 'ppt' }
+
+const APPS = { word: 'Microsoft Word', excel: 'Microsoft Excel', ppt: 'Microsoft PowerPoint' } as const
+
+/** What the model is told the first time it reaches for one of those skills. */
+export function redirectText(skill: string, app: 'word' | 'excel' | 'ppt'): string {
+  return [
+    `Not loaded: ${APPS[app]} is installed on this computer, so do this work inside it with the office_ tools instead of building the file with a script.`,
+    'Call office_open with the absolute path (a path that does not exist yet creates the document; the app is started for you if it is not running), then office_read, office_edit, office_render, office_save. The user watches the document take shape in the window and can edit alongside; formulas, captions and layout are done by the app itself.',
+    `Only if the task truly cannot be done that way (converting many files in bulk, a file the app cannot open, no document to show), call skill "${skill}" again and it will load.`,
+  ].join('\n')
+}
+
 /** System-prompt section: when to reach for the office_ tools, in as few tokens as will do. */
 export function promptText(): string {
   return [
     '# Office documents (Word, Excel, PowerPoint)',
     'The office_ tools work inside the real Office apps on this computer: the document is open in its window, every change you make appears there at once, and the user can read and edit alongside you.',
-    '- For any .docx / .xlsx / .pptx work, call office_open first, then office_read, then office_edit. Prefer this over writing the file with scripts or libraries: an open file cannot be overwritten, and the user would not see the work.',
+    '- For any Word, Excel or PowerPoint work, creating a new document included, start with office_open (it starts the app if it is not running, and a path that does not exist yet creates the file), then office_read and office_edit. Do not load the office-docx / office-xlsx / office-pptx skills and do not write the file with a script: an open file cannot be overwritten, and the user would not see the work.',
     '- Put all the changes you can into one office_edit call; it runs them in order.',
     '- The user may edit while you work. Read again before editing a part you have not just read, and pass "expect" on Word paragraphs.',
     '- Use these tools, not python-docx / openpyxl / python-pptx or other file libraries, whenever the document is to be worked on in the user\'s Office app or is already open there; and check the result with office_render, not by converting the file with another renderer, which lays it out differently from Word.',

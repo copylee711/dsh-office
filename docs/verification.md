@@ -99,3 +99,25 @@
 - Excel、PowerPoint 的跟随与逐字只通过了原有的回归脚本（不报错），没有观察窗口。
 - 用户与 AI 同时编辑、Office 忙时的等待，仍未实测。
 
+## 0.2.1
+
+起因：用户在桌面版里说“用 word 写一篇……”，模型先加载了 DSH 自带的 `office-docx` 技能，看到 `office_status` 报“Word: not running”后改用 python-docx 写脚本生成文件，只在最后用本插件打开看了几页，还用命令行关掉了用户的 Word。全程没有调用 `office_edit`，所以迷你卡片也没出现（卡片当时只在编辑时显示）。
+
+改动：
+
+- 模型加载 `office-docx` / `office-xlsx` / `office-pptx` 技能时，如果对应的 Office 应用已安装，第一次请求被拒绝并告知改用 `office_` 工具；同一会话里再次请求同一技能则放行。设置“优先在真实 Office 里操作”可关。
+- 状态里“not running”改为“installed, not running (office_open starts it)”；系统提示写明新建文档也从 `office_open` 开始。
+- `office_open` 时就显示迷你卡片。
+- 空文档里带 `expect` 的插入不再误报“字段被忽略”。
+
+验证：
+
+- 隔离的 `dsh web`，opencode go 模型，提示要求“先加载 office-docx 技能再写文档”：技能请求被拒并收到引导，模型随后用 `office_open → office_read → office_edit → office_render → office_save` 完成，7 步、38.3 秒。
+- `pnpm typecheck`、`pnpm test`（23 项）通过；`node scripts/office-smoke.mjs` 全部通过。
+
+没有验证的：
+
+- 没有在用户的桌面版里重跑原来那句提示（隔离环境没有自带的 Office 技能，测试里是让模型主动去加载）。模型不加载技能、直接写 python-docx 脚本的情况拦不住，只能靠系统提示。
+- “再次请求放行”这条路径没有实测。
+- `office_open` 时显示卡片没有截图确认。
+

@@ -46,7 +46,7 @@ describe('what the model reads', () => {
       { app: 'excel', installed: true, running: false, documents: [] },
       { app: 'ppt', installed: false, running: false, documents: [] },
     ])
-    expect(text).toBe('Word:\n  文档1 (never saved) — unsaved changes, active\nExcel: not running\nPowerPoint: not installed')
+    expect(text).toBe('Word:\n  文档1 (never saved) — unsaved changes, active\nExcel: installed, not running (office_open starts it)\nPowerPoint: not installed')
   })
 
   it('reports a finished batch as not saved yet, and a failed one with where it stopped', () => {
