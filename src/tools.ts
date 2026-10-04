@@ -182,7 +182,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const { path, app } = args as { path?: string; app?: string }
       if (path !== undefined && !isAbsolute(path)) throw new Error('path must be an absolute path.')
       const kind = appOf({ ...(app === undefined ? {} : { app }), ...(path === undefined ? {} : { path }) })
-      const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: host.settings().showOnOpen }, 80_000)
+      const { showOnOpen, follow, typing, card } = host.settings()
+      const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: showOnOpen, follow, typing, card }, 80_000)
       current = { app: kind, doc: doc.path ?? doc.name }
       return { text: formatOpened(doc) }
     },

@@ -46,7 +46,7 @@ describe('office tools', () => {
   it('opens by path and reports how', async () => {
     const { calls, run } = setup(() => ({ app: 'word', name: 'a.docx', path: 'C:\\t\\a.docx', saved: true, active: true, how: 'created' }))
     const result = await run('office_open', { path: 'C:\\t\\a.docx' })
-    expect(calls[0]).toEqual({ cmd: 'open', args: { app: 'word', path: 'C:\\t\\a.docx', show: true } })
+    expect(calls[0]).toEqual({ cmd: 'open', args: { app: 'word', path: 'C:\\t\\a.docx', show: true, follow: true, typing: true, card: true } })
     expect(result.text).toBe('Created C:\\t\\a.docx in Word (saved, active).')
     await expect(run('office_open', { path: 'relative.docx' })).rejects.toThrow(/absolute/)
   })

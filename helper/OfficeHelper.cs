@@ -560,6 +560,13 @@ static class Program
         }
         Dictionary<string, object> info = Info(kind, doc, Active(kind, app));
         info["how"] = how;
+        if (a.Flag("card", false))
+        {
+            if (!cardStarted) { cardStarted = true; Card.Start(); }
+            Following = Card.FollowChosen ? Following : a.Flag("follow", false);
+            Typing = Card.TypingChosen ? Typing : a.Flag("typing", false);
+            Card.Report("AI 打开了 " + (string)doc.Name);
+        }
         return info;
     }
 
@@ -1068,7 +1075,11 @@ static class Program
     {
         string where = op.Str("where", op.Has("para") ? "after" : "end");
         // A new, empty document: its one empty paragraph is where the text goes, wherever the operation points.
-        if ((int)doc.Paragraphs.Count == 1 && (string)doc.Paragraphs[1].Range.Text == "\r") return doc.Paragraphs[1];
+        if ((int)doc.Paragraphs.Count == 1 && (string)doc.Paragraphs[1].Range.Text == "\r")
+        {
+            op.Raw("para"); op.Raw("expect");
+            return doc.Paragraphs[1];
+        }
         if (where == "end")
         {
             dynamic last = doc.Paragraphs.Last;

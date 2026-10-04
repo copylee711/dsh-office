@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from './system-prompt-service.js'
 import type { AppStatus } from './format.js'
 import { HelperClient } from './helper-client.js'
-import { promptText } from './prompt.js'
+import { FILE_SKILLS, promptText, redirectText } from './prompt.js'
 import { resolveConfig, type Settings } from './settings.js'
 import { createTools } from './tools.js'
 
@@ -30,6 +30,7 @@ export interface Config {
   typing?: boolean
   card?: boolean
   finalCheck?: boolean
+  preferLive?: boolean
   showOnOpen?: boolean
   renderWidth?: number
 }
@@ -50,6 +51,10 @@ export const Config: z<Config> = z.object({
   finalCheck: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '交付前整体视觉检查：保存时如果 AI 改完后还没看过成品，自动把各页渲染成图片给它检查' },
     'en-US': { $description: 'Whole-document visual check: on save, show the AI every page if it has not looked since its last edits' },
+  }),
+  preferLive: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: '优先在真实 Office 里操作：AI 想加载 DSH 自带的 office-docx / xlsx / pptx 技能（用脚本改文件）时，先把它引回本插件' },
+    'en-US': { $description: 'Prefer the real Office app: when the AI reaches for the host\'s file-based office skills, point it back to this plugin first' },
   }),
   showOnOpen: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '打开文档时把它的窗口带到前台' },
@@ -105,6 +110,30 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   })
   for (const tool of tools) ctx.effect(() => ctx.tools.register(tool), `office: tool ${tool.name}`)
+
+  // The host ships skills that build Office files with python libraries. With the real app on this
+  // computer that is the worse route (nothing to watch, an open file cannot be written, formulas and
+  // layout come out differently), and a loaded skill outweighs the system prompt. So the first time the
+  // model reaches for one, it is pointed here instead; asking a second time goes through.
+  let installed: Promise<Set<string>> | undefined
+  const installedApps = (): Promise<Set<string>> => {
+    installed ??= helper.call<AppStatus[]>('status', {}, 30_000)
+      .then(apps => new Set(apps.filter(app => app.installed).map(app => app.app as string)))
+      .catch(() => { installed = undefined; return new Set<string>() })
+    return installed
+  }
+  const redirected = new Set<string>()
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.name !== 'skill' || !settings().preferLive) return next()
+    const skill = String((exec.arguments as { name?: unknown } | undefined)?.name ?? '')
+    const app = FILE_SKILLS[skill]
+    if (app === undefined) return next()
+    const session = (exec.agent as { session?: { id?: string } } | undefined)?.session?.id ?? 'default'
+    const key = `${session}:${skill}`
+    if (redirected.has(key) || !(await installedApps()).has(app)) return next()
+    redirected.add(key)
+    return { kind: 'deny', reason: redirectText(skill, app) }
+  })
 
   // Settings page bridge (which apps are installed and what is open); optional so headless hosts still load.
   ctx.inject(['webServer'], (webCtx: Context) => {

@@ -16,6 +16,8 @@ export interface Settings {
   card: boolean
   /** On save, show the model every page as it is now if it has not looked since its last edits. */
   finalCheck: boolean
+  /** Turn the model away from the host's file-based Office skills when the real app is installed. */
+  preferLive: boolean
   /** Bring the document's window to the front when office_open opens it. */
   showOnOpen: boolean
   /** Width in pixels of the pictures office_render gives the model. */
@@ -27,6 +29,7 @@ export const DEFAULTS: Settings = {
   typing: true,
   card: true,
   finalCheck: true,
+  preferLive: true,
   showOnOpen: true,
   renderWidth: 1100,
 }
@@ -47,6 +50,7 @@ export function resolveConfig(raw: unknown): Settings {
     typing: typeof out.typing === 'boolean' ? out.typing : DEFAULTS.typing,
     card: typeof out.card === 'boolean' ? out.card : DEFAULTS.card,
     finalCheck: typeof out.finalCheck === 'boolean' ? out.finalCheck : DEFAULTS.finalCheck,
+    preferLive: typeof out.preferLive === 'boolean' ? out.preferLive : DEFAULTS.preferLive,
     showOnOpen: typeof out.showOnOpen === 'boolean' ? out.showOnOpen : DEFAULTS.showOnOpen,
     renderWidth: typeof width === 'number' && Number.isFinite(width) ? Math.min(2000, Math.max(600, Math.round(width))) : DEFAULTS.renderWidth,
   }

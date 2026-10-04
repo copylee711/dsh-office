@@ -23,7 +23,7 @@ export function formatStatus(apps: AppStatus[]): string {
   for (const app of apps) {
     const name = APP_NAMES[app.app]
     if (!app.installed) { lines.push(`${name}: not installed`); continue }
-    if (!app.running) { lines.push(`${name}: not running`); continue }
+    if (!app.running) { lines.push(`${name}: installed, not running (office_open starts it)`); continue }
     if (app.error) { lines.push(`${name}: ${app.error}`); continue }
     if (app.documents.length === 0) { lines.push(`${name}: running, nothing open`); continue }
     lines.push(`${name}:`)
