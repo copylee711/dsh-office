@@ -1741,7 +1741,7 @@ static class Program
         }
     }
 
-    static readonly System.Text.RegularExpressions.Regex Typed = new System.Text.RegularExpressions.Regex(@"^\[[1-9]\d{0,2}([,，\-–][1-9]\d{0,2})*\]$");
+    static readonly System.Text.RegularExpressions.Regex Typed = new System.Text.RegularExpressions.Regex(@"^\[[1-9]\d{0,2}([,，\-–][1-9]\d{0,2})*\]\z");
 
     /// Citations typed by hand in a range: "[2]" or "[1,3]" in running text is rewritten as \cite{..}, and "[2] ..."
     /// opening a paragraph is an entry of a hand-made reference list, whose number gets the bookmark citations jump to.
