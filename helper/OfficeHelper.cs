@@ -4949,6 +4949,36 @@ static class Program
     const char Blank = '\u2007';
     /// How far down, in type sizes, a formula picture goes from the middle of its line to sit on the text's baseline.
     const double Lower = 0.3;
+    /// Where the baseline of a line of slide text is, as a part of the line's height (ascent over ascent plus descent).
+    const double TextBaseline = 0.8;
+
+    /// How far below the top of a formula picture the baseline of its line is, in points: the foot of the letter that
+    /// was set before the formula, found in the left part of the picture (as wide as "before" points). -1 if not found.
+    static double BaselineOf(byte[] bits, double before, double height)
+    {
+        try
+        {
+            const double zoom = 6;
+            double frame = (BitConverter.ToInt32(bits, 32) - BitConverter.ToInt32(bits, 24)) / 2540.0 * 72.0;
+            int w = (int)Math.Floor(before * zoom) - 2, h = (int)Math.Ceiling(height * zoom);
+            if (w < 4 || h < 4 || h > 6000) return -1;
+            using (MemoryStream stream = new MemoryStream(bits))
+            using (System.Drawing.Imaging.Metafile drawing = new System.Drawing.Imaging.Metafile(stream))
+            using (System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(w, h))
+            {
+                using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bitmap))
+                {
+                    g.Clear(System.Drawing.Color.White);
+                    g.DrawImage(drawing, new System.Drawing.RectangleF(0, 0, (float)(frame * zoom), (float)(height * zoom)));
+                }
+                for (int row = h - 1; row >= 0; row--)
+                    for (int column = 0; column < w; column++)
+                        if (bitmap.GetPixel(column, row).GetBrightness() < 0.45f) return (row + 1) / zoom;
+            }
+        }
+        catch (Exception error) { Trace("baseline of a formula picture: " + error.Message.Trim()); }
+        return -1;
+    }
 
     static bool PicSource()
     {
@@ -5018,8 +5048,11 @@ static class Program
                 if (size < 4 || size > 400) size = 18;
                 PicDoc.Content.Delete();
                 // Something before it on the line keeps a formula that belongs inside a sentence in its smaller, inline set.
-                PicDoc.Content.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"left\"/></m:oMathParaPr>" + (string)made + "</m:oMathPara>" : "<w:r><w:t>\u200B</w:t></w:r>" + (string)made));
+                PicDoc.Content.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"left\"/></m:oMathParaPr>" + (string)made + "</m:oMathPara>" : "<w:r><w:t>H</w:t></w:r>" + (string)made));
                 if ((int)PicDoc.OMaths.Count == 0) { SlideMathSkipped++; continue; }
+                // The letter put before a formula that stands inside a sentence is there to be measured: where it
+                // stands is the baseline of the line. It is black, whatever the formula's colour, and cut off afterwards.
+                try { dynamic all = PicDoc.Paragraphs[1].Range; all.Font.Size = size; all.Font.Color = 0; } catch (Exception) { }
                 dynamic math = PicDoc.OMaths[1].Range;
                 math.Font.Size = size;
                 math.Font.Color = ink;
@@ -5039,6 +5072,7 @@ static class Program
                     bool wrapped = Math.Abs(Convert.ToDouble(PicDoc.Range(to, to).Information[6]) - Convert.ToDouble(PicDoc.Range(from, from).Information[6])) > 1;
                     if (!wrapped && right - margin <= 400) break;
                     used = Math.Max(3, wrapped ? used * 0.62 : used * 385 / (right - margin));
+                    try { PicDoc.Paragraphs[1].Range.Font.Size = (float)used; } catch (Exception) { }
                     math.Font.Size = (float)used;
                     math = PicDoc.OMaths[1].Range;
                     from = (int)math.Start; to = (int)math.End;
@@ -5050,6 +5084,7 @@ static class Program
                 if (bits == null || bits.Length < 88 || width < 1) { SlideMathSkipped++; continue; }
                 // The frame of the picture, in hundredths of a millimetre.
                 double height = (BitConverter.ToInt32(bits, 36) - BitConverter.ToInt32(bits, 28)) / 2540.0 * 72.0;
+                double baseline = display ? -1 : BaselineOf(bits, left - margin, height) * up;
                 // From here on the two are what the formula measures on the slide.
                 double cut = width;
                 width *= up; height *= up;
@@ -5077,8 +5112,8 @@ static class Program
                     }
                 }
                 catch (Exception) { }
-                mine.Insert(0, new object[] { textRange, 0, file, left - margin, width, height, frame, (double)size, cut });
-                Trace("formula " + k + " \"" + source + "\" as a picture " + Math.Round(width) + "x" + Math.Round(height) + ", " + count + " blank(s); from " + Math.Round(left) + " to " + Math.Round(right) + ", margin " + Math.Round(margin) + ", frame " + Math.Round(frame) + (display ? ", display" : ""));
+                mine.Insert(0, new object[] { textRange, 0, file, left - margin, width, height, frame, (double)size, cut, baseline });
+                Trace("formula " + k + " \"" + source + "\" as a picture " + Math.Round(width) + "x" + Math.Round(height) + ", " + count + " blank(s); from " + Math.Round(left) + " to " + Math.Round(right) + ", margin " + Math.Round(margin) + ", frame " + Math.Round(frame) + (display ? ", display" : ", baseline " + Math.Round(baseline, 1)));
             }
             catch (Exception error) { SlideMathSkipped++; Trace("formula " + k + " failed: " + error.GetType().Name + " " + error.Message); }
         }
@@ -5096,7 +5131,7 @@ static class Program
             {
                 dynamic range = one[0];
                 int ordinal = (int)one[1];
-                double empty = (double)one[3], width = (double)one[4], height = (double)one[5], frame = (double)one[6], size = (double)one[7], cut = (double)one[8];
+                double empty = (double)one[3], width = (double)one[4], height = (double)one[5], frame = (double)one[6], size = (double)one[7], cut = (double)one[8], baseline = (double)one[9];
                 string text = (string)range.Text ?? "";
                 int at = -1, length = 0, seen = -1;
                 for (int i = 0; i < text.Length; i++)
@@ -5120,8 +5155,11 @@ static class Program
                 picture.Width = (float)width;
                 picture.Height = (float)height;
                 picture.Left = (float)(x + (w - width) / 2);
-                // The line of the math font keeps more room under the letters than over them.
-                picture.Top = (float)(y + (h - height) / 2 + (height < 2 * size ? Lower + 0.1 : Lower) * size);
+                // Inside a sentence the formula stands on the baseline of the text: about four fifths down the line,
+                // whatever the typeface. On a line of its own it goes in the middle (the line of the math font keeps
+                // more room under the letters than over them, hence a little lower).
+                if (baseline > 0) picture.Top = (float)(y + TextBaseline * h - baseline);
+                else picture.Top = (float)(y + (h - height) / 2 + Lower * size);
                 try { picture.Name = "Formula of " + (string)shape.Name + " " + (ordinal + 1); } catch (Exception) { }
             }
             catch (Exception error) { SlideMathSkipped++; Trace("placing a formula picture: " + error.GetType().Name + " " + error.Message); }
