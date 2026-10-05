@@ -3,7 +3,7 @@
  * sent with every request, and a batch of edits in one call is one model round
  * instead of one per change.
  */
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { access, copyFile, mkdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
 
@@ -121,7 +121,37 @@ Formulas: write LaTeX between dollar signs in any text (paragraphs, table cells,
 - autofit {range?}; insert_rows / delete_rows {row, count?}
 - add_sheet {name}; rename_sheet {sheet, name}; delete_sheet {sheet}
 - add_chart {range, chart?: column|bar|line|pie|scatter|area, title?, at?: cell, width?, height?}`,
-  ppt: `PowerPoint ops. slide = slide number; shape = a shape name from office_read, or "title" / "body". Positions and sizes are in points. Formulas: write LaTeX between dollar signs in any slide text (title, body, text box), as in Word; they become native PowerPoint equations, inline with the text. A formula on its own gets a text box of its own.
+  ppt: `PowerPoint: build a deck out of DESIGNED SLIDES. One "slide" op makes one finished slide — laid out, coloured, set in type, with its page number, transition and entrance animation — from the content you give; you do not place boxes yourself. A whole deck is one or two office_edit calls.
+- theme {name, primary?, accent?, bg?, surface?, text?, muted?, titleFont?, bodyFont?, transition?: fade|push|wipe|split|none, animate?} — set it FIRST, once. name: ink (white, navy + red; reports, data), paper (warm white, serif titles; teaching, science), ocean, forest, graphite (light) or night (near-black with gold; pitches, stories), chalk (blackboard green; lessons), plum (dark). Pick the one that suits the subject and audience; change single colours to match a brand.
+- slide {kind, title, subtitle?, kicker?, note?, notes?, image?, callout?, at?, ...} — kicker: the small line above the title (the section, e.g. "二、方法"); note: the source line at the foot; notes: speaker notes; callout: one sentence set apart at the foot of the body; image: path of a picture. In every text **words** are set bold in the accent colour and $...$ is a formula.
+  kinds and their own fields:
+  · cover {title, subtitle?, kicker?, meta?, image?} — the opening slide; closing {title, subtitle?, image?} — the last one.
+  · section {number?, title, subtitle?, image?} — a divider before each part ("01", "02" ..).
+  · agenda {points:[..]} — the numbered outline.
+  · bullets {points:[text | {head, text}], image?} — at most 5 points; prefer {head, text}.
+  · cards {cards:[{head, text, icon?, value?}]} — 2 to 6 parallel ideas side by side.
+  · stats {stats:[{value, unit?, label, delta?, icon?}], points?} — 2 to 4 big numbers.
+  · chart {chart:{type: column|bar|line, categories:[..], series:[{name, values:[..]}], unit?, highlight?: a category}, side?:[{head, text}]} — a chart drawn from your numbers, with remarks beside it.
+  · table {data:[[header..],[row..]..]} — up to 8 rows.
+  · formula {formulas:[{latex, label?}], points?} — 1 to 3 formulas on cards, explained underneath.
+  · timeline {steps:[{when, head, text}]}; process {steps:[{head, text}]} — up to 5; compare {left:{head, points:[..]}, right:{head, points:[..]}}.
+  · image {image, title, text?, caption?} — a full-bleed photograph with the words on it; quote {text, by?}.
+  icon: check clock search star chart list people target bolt flag globe lock book calendar document layers trend link code heart warning home idea pin money arrow cloud mail shield eye pie wave question info grid edit plus play.
+- How to make a deck people want to look at:
+  · Plan it as a talk: cover, agenda, then for each part a section slide and 2–4 content slides, a closing. 10–16 slides for a normal report.
+  · Give every slide ONE message, and write the title as that message, a full statement ("客运量超过 2019 年高点"), not a topic ("客运情况").
+  · Change the kind from slide to slide: never two bullets slides in a row, and no more than a third of the deck as bullets. Numbers go on stats or chart, parallel ideas on cards, a sequence on process or timeline, two sides on compare, a definition or theorem on formula.
+  · Keep text short: a point is one line, a card text two. What you would say aloud goes into notes.
+  · Use pictures: a photograph on the cover and on an image slide or two lifts a deck more than anything else. Get them with your web / image tools (search and download, or generate) into the working folder, then pass the path; a chart or diagram you draw yourself is shown whole on a card.
+  · Look at the result with office_render {overview: true} and fix slides whose text is cut off or crowded (shorten the words, or split the slide).
+- Working from a TEMPLATE or an EXAMPLE the user gives (a .pptx whose look the deck should have): do not rebuild its look by hand, work inside a copy of it.
+  1. office_open {path: the new file, template: the user's file}, then office_render {overview: true} (again with slide numbers for the rest of a long template) to see every page, and office_read {slide: n} for the pages you will use: it lists each text and picture with its "#id".
+  2. For each slide of your deck pick the template page that fits what it says (cover, contents, section, text + picture, three points, comparison, timeline, thanks ..) and make it with reuse_slide {from: n, texts: {"#id" or name: new text, ..}, images?: {"#id": path}, delete?: ["#id", ..], notes?} — a copy of page n with your words in place of its sample text, its look and animation kept. Replace EVERY sample text of the page (Lorem ipsum, "SAMPLE TITLE", xxxx) or delete the shape; keep your text about as long as the sample it replaces. New slides are added after the template's pages, so the numbers of the template pages stay valid.
+  3. Where no page fits (a chart, big figures, a formula, a table): slide {kind, .., base: n, area: [left, top, width, height]} draws that kind on a copy of template page n (a page with little on it: a content page with its sample deleted, or a plain background), inside the free area you give in points; set theme {primary, accent, text, bg, titleFont..} first to the template's colours (read them off the render) so the two match. theme {base, area} makes this the default for every slide op — the way to use a template that is only background pictures.
+  4. Finish with delete_slides {from: 1, to: last template page} so only your slides remain, render the overview and check that no sample text is left.
+The operations below are for touching up a designed slide or for the rare slide no kind fits.
+
+PowerPoint ops. slide = slide number; shape = a shape name or "#id" from office_read, or "title" / "body". Positions and sizes are in points. Formulas: write LaTeX between dollar signs in any slide text (title, body, text box), as in Word; they become native PowerPoint equations, inline with the text. A formula on its own gets a text box of its own.
 - add_slide {layout?: title|title_content|two_content|title_only|blank|section, title?, body?, notes?, at?} — body: lines separated by newlines become bullets.
 - set_text {slide, shape, text, size?, bold?, color?, align?} — a line that starts with a tab (or two spaces) is a bullet one level down.
 - format_text {slide, shape, find?, font?, size?, bold?, italic?, underline?, color?, align?, bullets?, lineSpacing?, fit?: "shrink"|"grow"|"none"} — the whole text of the shape, or only the part that reads find.
@@ -131,7 +161,7 @@ Formulas: write LaTeX between dollar signs in any text (paragraphs, table cells,
 - add_table {slide, data:[[cell,..],..], left?, top?, width?, height?, size?, font?, align?, header?, name?} — a native table; formulas in its cells are set as text with real subscripts and powers.
 - add_shape {slide, kind, left, top, width, height, text?, fill?, line?: colour|"none", lineWidth?, size?, bold?, color?, name?} — kind: rectangle | rounded | ellipse | diamond | triangle | arrow | arrow_left | arrow_up | arrow_down | chevron | pentagon | hexagon | star | callout | cloud | line | arrow_line (for a line, width and height are how far it runs).
 - set_shape {slide, shape, left?, top?, width?, height?, fill?, name?}; delete_shape {slide, shape}
-- delete_slide {slide}; move_slide {slide, to}; duplicate_slide {slide, to?}; set_layout {slide, layout}; set_background {slide, color}; set_notes {slide, text}`,
+- reuse_slide {from, texts?, images?, delete?, at?, notes?}; delete_slides {from, to}; delete_slide {slide}; move_slide {slide, to}; duplicate_slide {slide, to?}; set_layout {slide, layout}; set_background {slide, color}; set_notes {slide, text}`,
 }
 
 export function createTools(host: ToolHost): ToolDefinition[] {
@@ -224,13 +254,21 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     description: 'Open a .docx / .xlsx / .pptx file in Word, Excel or PowerPoint so the user watches the work and can edit alongside; a path that does not exist yet creates the file. If the file is already open it is used as it is. Call this before the other office_ tools.',
     parameters: {
       path: { type: 'string', description: 'Absolute path of the file. Omit to start an unsaved new document (then app is required).' },
+      template: { type: 'string', description: 'Absolute path of a template or an example to start from: it is copied to path (which must not exist yet) and the copy is opened, the original left untouched. Use it when the user gives a template or a sample whose look the new document should have.' },
       app: { type: 'string', enum: ['word', 'excel', 'ppt'], description: 'Needed only without path.' },
     },
     output,
     timeoutMs: 90_000,
     async execute(args, exec): Promise<Value> {
-      const { path, app } = args as { path?: string; app?: string }
+      const { path, app, template } = args as { path?: string; app?: string; template?: string }
       if (path !== undefined && !isAbsolute(path)) throw new Error('path must be an absolute path.')
+      if (template !== undefined) {
+        if (path === undefined) throw new Error('With template, give path: where the copy is to be saved.')
+        if (!isAbsolute(template)) throw new Error('template must be an absolute path.')
+        if (extname(template).toLowerCase() !== extname(path).toLowerCase()) throw new Error('template and path must be the same kind of file.')
+        if (await access(path).then(() => true, () => false)) throw new Error(`${path} exists already: pick a path that does not, the template is copied there.`)
+        await copyFile(template, path).catch(error => { throw new Error(`Could not copy the template: ${error instanceof Error ? error.message : String(error)}`) })
+      }
       const kind = appOf({ ...(app === undefined ? {} : { app }), ...(path === undefined ? {} : { path }) })
       const { showOnOpen, follow, typing, card } = host.settings()
       const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: showOnOpen, follow, typing, card }, 80_000)
