@@ -34,7 +34,7 @@ describe('client bundle', () => {
 describe('settings', () => {
   it('fills defaults, unwraps volatile refs and clamps', () => {
     expect(resolveConfig({})).toEqual(DEFAULTS)
-    expect(resolveConfig({ renderWidth: { get: () => 1400 }, showOnOpen: false, follow: false })).toEqual({ renderWidth: 1400, showOnOpen: false, follow: false, typing: true, card: true, finalCheck: true, preferLive: true })
+    expect(resolveConfig({ renderWidth: { get: () => 1400 }, showOnOpen: false, follow: false })).toEqual({ renderWidth: 1400, showOnOpen: false, follow: false, typing: true, card: true, finalCheck: true, preferLive: true, silent: false })
     expect(resolveConfig({ renderWidth: 99999 }).renderWidth).toBe(2000)
     expect(resolveConfig({ renderWidth: 'wide' }).renderWidth).toBe(DEFAULTS.renderWidth)
   })

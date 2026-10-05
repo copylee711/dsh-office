@@ -6,7 +6,7 @@ import { appOf, createTools } from '../src/tools.js'
 
 interface Call { cmd: string; args: Record<string, unknown> }
 
-function setup(reply: (cmd: string, args: Record<string, unknown>) => unknown, vision = true) {
+function setup(reply: (cmd: string, args: Record<string, unknown>) => unknown, vision = true, settings = DEFAULTS) {
   const calls: Call[] = []
   const helper: HelperLike = {
     async call<T>(cmd: string, args: Record<string, unknown> = {}) { calls.push({ cmd, args }); return reply(cmd, args) as T },
@@ -15,7 +15,7 @@ function setup(reply: (cmd: string, args: Record<string, unknown>) => unknown, v
   }
   const tools = createTools({
     helper,
-    settings: () => DEFAULTS,
+    settings: () => settings,
     async saveImage(_data, name) { return { attachmentId: 'a1', mediaType: 'image/png', bytes: 3, width: 10, height: 20, name } as never },
     vision: async () => vision,
   })
@@ -97,7 +97,7 @@ describe('office tools', () => {
     const ops = [{ op: 'set_text', para: 2, expect: '旧', text: '新' }, { op: 'replace_text', find: 'a', replace: 'b' }, { op: 'delete_range', para: 9 }]
     const { calls, run } = setup(() => ({ done: ['paragraph 2 rewritten'], total: 3, failed: { index: 1, op: 'replace_text', code: 'NOT_FOUND', error: 'The text "a" does not occur in the document.' } }))
     const result = await run('office_edit', { doc: 'C:\\t\\a.docx', ops })
-    expect(calls[0]).toEqual({ cmd: 'edit', args: { app: 'word', doc: 'C:\\t\\a.docx', ops, follow: true, typing: true, card: true } })
+    expect(calls[0]).toEqual({ cmd: 'edit', args: { app: 'word', doc: 'C:\\t\\a.docx', ops, follow: true, typing: true, card: true, silent: false } })
     expect(result.text).toContain('Stopped at operation 2 (replace_text): The text "a" does not occur')
     expect(result.text).toContain('1. paragraph 2 rewritten')
     expect(result.text).toContain('The 1 operation(s) after it did not run.')
@@ -117,6 +117,24 @@ describe('office tools', () => {
     expect(saved.text).toContain('The open document is now this file.')
     await run('office_read', {})
     expect(calls[1]!.args).toEqual({ app: 'word', doc: 'C:\\t\\new.docx' })
+  })
+
+  it('works in the background in silent mode: no window, no card, text at once; the window on request', async () => {
+    const { calls, run } = setup(cmd => {
+      if (cmd === 'open') return { app: 'word', name: 'a.docx', path: 'C:\\t\\a.docx', saved: true, active: false, how: 'created', background: true }
+      if (cmd === 'edit') return { done: ['formatted'], total: 1 }
+      return null
+    }, true, { ...DEFAULTS, silent: true })
+    const opened = await run('office_open', { path: 'C:\\t\\a.docx' })
+    expect(calls[0]).toEqual({ cmd: 'open', args: { app: 'word', path: 'C:\\t\\a.docx', silent: true, show: false } })
+    expect(opened.text).toContain('in the background, no window')
+    expect(opened.text).toContain('Silent mode is on')
+    expect((await run('office_open', { path: 'C:\\t\\a.docx' })).text).not.toContain('Silent mode is on')
+    await run('office_edit', { doc: 'C:\\t\\a.docx', ops: [{ op: 'format_text', para: 1, bold: true }] })
+    expect(calls.at(-1)!.args).toMatchObject({ silent: true, card: false })
+    await run('office_open', { path: 'C:\\t\\a.docx', show: true })
+    expect(calls.at(-1)!.args).toMatchObject({ show: true })
+    expect(calls.at(-1)!.args.silent).toBeUndefined()
   })
 
   it('takes "page" for the slide of a deck, also when the arguments cannot be written to', async () => {

@@ -396,6 +396,7 @@ static class Program
         Send(new Dictionary<string, object> { { "event", "ready" } });
         AppDomain.CurrentDomain.ProcessExit += delegate { MathQuit(); };
         Sweep();
+        SweepOwn();
         string line;
         while ((line = input.ReadLine()) != null)
         {
@@ -485,6 +486,211 @@ static class Program
 
     /// The apps this helper started because they were not running (as opposed to the ones it found open).
     static readonly HashSet<string> Started = new HashSet<string>();
+
+    // Silent mode. Word and Excel get an instance of their own that is never shown, apart from whatever the user has
+    // open: nothing flashes on their screen and their windows are not touched. PowerPoint runs once per session, so a
+    // deck is opened there without a window instead. What was opened this way is saved and closed when the agent stops.
+
+    /// word / excel → the hidden instance of our own.
+    static readonly Dictionary<string, object> Own = new Dictionary<string, object>();
+    /// Full paths of the documents opened in the background.
+    static readonly HashSet<string> Hidden = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    /// Documents brought into view on request while silent mode is on: these are worked on visibly from then on.
+    static readonly HashSet<string> Revealed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    static string OwnNotePath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-office", "background.pid");
+    }
+
+    /// Write down the process behind a hidden window, so that a later helper can end it should this one be cut off.
+    static void NoteOwn(long window)
+    {
+        try
+        {
+            uint pid;
+            GetWindowThreadProcessId(new IntPtr(window), out pid);
+            if (pid == 0) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(OwnNotePath()));
+            File.AppendAllText(OwnNotePath(), pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n");
+        }
+        catch (Exception) { }
+    }
+
+    /// Hidden instances a helper before this one left behind: ended, if they still show no window.
+    static void SweepOwn()
+    {
+        try
+        {
+            string note = OwnNotePath();
+            if (!File.Exists(note)) return;
+            foreach (string line in File.ReadAllLines(note))
+            {
+                int pid;
+                if (!int.TryParse(line.Trim(), out pid) || pid <= 0) continue;
+                try
+                {
+                    using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(pid))
+                    {
+                        string name = process.ProcessName.ToUpperInvariant();
+                        if ((name == "WINWORD" || name == "EXCEL") && process.MainWindowHandle == IntPtr.Zero) process.Kill();
+                    }
+                }
+                catch (Exception) { }
+            }
+            File.Delete(note);
+        }
+        catch (Exception) { }
+    }
+
+    static dynamic OwnApp(string kind, bool start)
+    {
+        object held;
+        if (Own.TryGetValue(kind, out held))
+        {
+            try { string alive = Convert.ToString(((dynamic)held).Version); return held; }
+            catch (Exception) { Own.Remove(kind); }
+        }
+        if (!start) return null;
+        if (kind == "ppt")
+        {
+            // PowerPoint runs once per session: the user's if it is open, else one we start — which stays alive only
+            // while it is held, having no window of its own.
+            dynamic deckApp = App(kind, true);
+            Own[kind] = deckApp;
+            return deckApp;
+        }
+        Type type = Type.GetTypeFromProgID(ProgId(kind));
+        if (type == null) throw new Fail("NOT_INSTALLED", AppName(kind) + " is not installed on this computer.");
+        dynamic app = Activator.CreateInstance(type);
+        try { app.Visible = false; } catch (Exception) { }
+        try { if (kind == "word") app.DisplayAlerts = 0; else app.DisplayAlerts = false; } catch (Exception) { }
+        if (kind == "excel") { try { NoteOwn(Convert.ToInt64(app.Hwnd)); } catch (Exception) { } }
+        Own[kind] = app;
+        return app;
+    }
+
+    /// The app that holds the document a command is about: our hidden one when the document is there, else the user's.
+    static dynamic AppFor(string kind, Bag a)
+    {
+        dynamic own = OwnApp(kind, false);
+        if (own != null)
+        {
+            string doc = a.Str("doc", null);
+            try { if (doc == null ? (int)Docs(kind, own).Count > 0 : Find(kind, own, doc) != null) return own; }
+            catch (Exception) { }
+        }
+        return App(kind, false);
+    }
+
+    /// Open (or make) a document where no one sees it.
+    static object OpenQuietly(string kind, string path)
+    {
+        dynamic theirs = Running(kind), own = OwnApp(kind, false);
+        dynamic doc = null, app = null;
+        string how = "attached";
+        // Open already — in the user's window or in the background: it is worked on where it is.
+        if (path != null)
+        {
+            if (own != null) { doc = Find(kind, own, path); if (doc != null) app = own; }
+            if (doc == null && theirs != null) { try { doc = Find(kind, theirs, path); if (doc != null) app = theirs; } catch (Exception) { } }
+        }
+        if (doc == null)
+        {
+            if (path != null && !File.Exists(path) && !Directory.Exists(Path.GetDirectoryName(path))) throw new Fail("BAD_ARGS", "The folder of \"" + path + "\" does not exist.");
+            bool exists = path != null && File.Exists(path);
+            if (kind == "ppt")
+            {
+                app = OwnApp(kind, true);
+                // The last argument is the window: none.
+                doc = exists ? app.Presentations.Open(path, 0, 0, 0) : app.Presentations.Add(0);
+            }
+            else
+            {
+                app = OwnApp(kind, true);
+                WaitReady(kind, app);
+                dynamic docs = Docs(kind, app);
+                doc = exists ? docs.Open(path) : docs.Add();
+                if (kind == "word") { try { NoteOwn(Convert.ToInt64(doc.ActiveWindow.Hwnd)); } catch (Exception) { } }
+            }
+            how = exists ? "opened" : "created";
+            if (!exists && path != null) SaveAs(kind, app, doc, path);
+            Hidden.Add((string)doc.FullName);
+        }
+        Dictionary<string, object> info = Info(kind, doc, null);
+        info["how"] = how;
+        info["background"] = Hidden.Contains((string)doc.FullName);
+        DocWindow = IntPtr.Zero;
+        return info;
+    }
+
+    /// Bring a document that was opened in the background into view, for work on its window.
+    static void Reveal(string kind, dynamic app, dynamic doc)
+    {
+        string full = (string)doc.FullName;
+        if (!Hidden.Contains(full)) return;
+        if (kind == "ppt") { try { doc.NewWindow(); } catch (Exception) { } app.Visible = -1; }
+        else
+        {
+            // The instance stays the one we reach this document through; it is only no longer hidden, and it is
+            // ended when its last document is closed, not when the agent stops.
+            app.Visible = true;
+            if (kind == "excel") { try { app.UserControl = true; } catch (Exception) { } }
+            try { if (kind == "word") { doc.Activate(); app.Activate(); } else doc.Activate(); } catch (Exception) { }
+        }
+        Hidden.Remove(full);
+        Revealed.Add(full);
+    }
+
+    /// The agent has stopped: what it opened in the background is saved and closed, and what we started for it ended.
+    static object Settle()
+    {
+        List<object> said = new List<object>();
+        foreach (string kind in new string[] { "word", "excel", "ppt" })
+        {
+            dynamic app = OwnApp(kind, false);
+            if (app == null) continue;
+            List<object> mine = new List<object>();
+            try { foreach (dynamic doc in Docs(kind, app)) if (Hidden.Contains((string)doc.FullName)) mine.Add(doc); }
+            catch (Exception) { }
+            foreach (dynamic doc in mine)
+            {
+                string full = "";
+                try
+                {
+                    full = (string)doc.FullName;
+                    bool unsaved = !Truthy(doc.Saved) && ((string)doc.Path).Length > 0;
+                    // No one can see this document, so work left unsaved would simply be lost: it is kept.
+                    if (unsaved) { if (kind == "word") FinishMath(doc); doc.Save(); }
+                    if (kind == "word") doc.Close(0); else if (kind == "excel") doc.Close(false); else { doc.Saved = -1; doc.Close(); }
+                    said.Add((unsaved ? "saved and closed " : "closed ") + full);
+                }
+                catch (Exception error) { said.Add("could not close " + full + ": " + error.Message.Trim()); }
+                Hidden.Remove(full);
+            }
+            try
+            {
+                bool seen = false;
+                try { seen = Truthy(app.Visible); } catch (Exception) { }
+                if (kind != "ppt" && (int)Docs(kind, app).Count == 0) { app.Quit(); Own.Remove(kind); }
+                else if (kind != "ppt" && !seen) { }   // still holds something of ours: stays for the next turn
+                else if (kind == "ppt")
+                {
+                    // Ours to end only if we started it, it holds nothing and shows nothing; else it is just let go of.
+                    bool shown = false;
+                    try { shown = Truthy(app.Visible); } catch (Exception) { }
+                    if (Started.Contains(kind) && !shown && (int)app.Presentations.Count == 0) { app.Quit(); Started.Remove(kind); }
+                    Own.Remove(kind);
+                }
+            }
+            catch (Exception) { }
+            app = null;
+        }
+        // The apps go only once nothing here refers to them any more.
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); GC.WaitForPendingFinalizers();
+        if (Own.Count == 0) { try { File.Delete(OwnNotePath()); } catch (Exception) { } }
+        return said;
+    }
 
     static dynamic App(string kind, bool start)
     {
@@ -596,6 +802,7 @@ static class Program
             return "ok";
         }
         if (cmd == "status") return Status();
+        if (cmd == "settle") return Settle();
         string kind = Kind(a);
         if (cmd == "open") return Open(kind, a);
         if (cmd == "quit")
@@ -606,10 +813,10 @@ static class Program
             idle.Quit();
             return "quit";
         }
-        dynamic app = App(kind, false);
+        dynamic app = AppFor(kind, a);
         WaitReady(kind, app);
         dynamic doc = Doc(kind, app, a);
-        if (cardStarted && CardOn && (cmd == "read" || cmd == "render" || cmd == "save"))
+        if (cardStarted && CardOn && !Hidden.Contains((string)doc.FullName) && (cmd == "read" || cmd == "render" || cmd == "save"))
         {
             // Between edits the agent reads and looks: the card stays, and its switch still leads to the document.
             Remember(doc);
@@ -665,6 +872,23 @@ static class Program
                 }
                 catch (COMException error) { string code; entry["error"] = Describe(error, out code); }
             }
+            try
+            {
+                dynamic own = OwnApp(kind, false);
+                if (own != null)
+                {
+                    HashSet<string> listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (object item in open) { Dictionary<string, object> one = item as Dictionary<string, object>; if (one != null) listed.Add(Convert.ToString(one["path"] ?? one["name"])); }
+                    foreach (dynamic doc in Docs(kind, own))
+                    {
+                        Dictionary<string, object> one = Info(kind, doc, null);
+                        if (listed.Contains(Convert.ToString(one["path"] ?? one["name"]))) continue;
+                        one["background"] = true; open.Add(one);
+                    }
+                }
+                foreach (object item in open) { Dictionary<string, object> one = item as Dictionary<string, object>; if (one != null && one["path"] != null && Hidden.Contains((string)one["path"])) one["background"] = true; }
+            }
+            catch (Exception) { }
             entry["documents"] = open;
             apps.Add(entry);
         }
@@ -679,10 +903,22 @@ static class Program
             if (!Path.IsPathRooted(path)) throw new Fail("BAD_ARGS", "\"path\" must be an absolute path.");
             path = Path.GetFullPath(path);
         }
-        dynamic app = App(kind, true);
-        Show(kind, app);
-        WaitReady(kind, app);
-        dynamic doc = path == null ? null : Find(kind, app, path);
+        if (a.Flag("silent", false)) return OpenQuietly(kind, path);
+        // A document that is open in the background is brought out rather than opened a second time.
+        dynamic hiding = OwnApp(kind, false);
+        dynamic app = null, doc = null;
+        if (hiding != null && path != null)
+        {
+            dynamic there = Find(kind, hiding, path);
+            if (there != null) { Reveal(kind, hiding, there); app = hiding; doc = there; }
+        }
+        if (app == null)
+        {
+            app = App(kind, true);
+            Show(kind, app);
+            WaitReady(kind, app);
+            doc = path == null ? null : Find(kind, app, path);
+        }
         string how = "attached";
         if (doc == null)
         {
@@ -773,6 +1009,19 @@ static class Program
     static object Close(string kind, dynamic doc, Bag a)
     {
         bool save = a.Flag("save", false);
+        string closing = "";
+        try { closing = (string)doc.FullName; } catch (Exception) { }
+        bool ours = Hidden.Remove(closing);
+        Revealed.Remove(closing);
+        dynamic mine = kind == "ppt" ? null : OwnApp(kind, false);
+        bool inOwn = false;
+        try { inOwn = mine != null && Find(kind, mine, closing) != null; } catch (Exception) { }
+        if (inOwn)
+        {
+            if (kind == "word") doc.Close(save ? -1 : 0); else doc.Close(save);
+            try { if ((int)Docs(kind, mine).Count == 0) { mine.Quit(); Own.Remove(kind); } } catch (Exception) { }
+            return "closed";
+        }
         if (kind == "word") doc.Close(save ? -1 : 0);
         else if (kind == "excel") doc.Close(save);
         else { if (save) doc.Save(); else doc.Saved = -1; doc.Close(); }
@@ -7237,8 +7486,11 @@ static class Program
         if (!Card.FollowChosen) Following = a.Flag("follow", false);
         if (!Card.TypingChosen) Typing = a.Flag("typing", false);
         bool card = a.Flag("card", false);
+        bool quiet = false;
+        try { string whole = (string)doc.FullName; quiet = Hidden.Contains(whole) || (a.Flag("silent", false) && !Revealed.Contains(whole)); } catch (Exception) { }
+        if (quiet) { Following = false; Typing = false; card = false; }
         CardOn = card;
-        Remember(doc);
+        if (!quiet) Remember(doc); else DocWindow = IntPtr.Zero;
         if (card && !cardStarted) { cardStarted = true; Card.Start(); }
         string docName = (string)doc.Name;
         dynamic undo = null;
