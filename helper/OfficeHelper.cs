@@ -934,7 +934,9 @@ static class Program
                     string top = TexArg(s, ref i), bottom = TexArg(s, ref i);
                     // A factor written right before the fraction (2rac{a}{b}) must not be read into its numerator.
                     if (o.Length > 0 && char.IsLetterOrDigit(o[o.Length - 1])) o.Append(' ');
-                    o.Append("(" + top + ")/(" + bottom + ")");
+                    // A function applied to a fraction (\sin\frac{a}{b}) takes the whole fraction, not just its numerator.
+                    bool applied = System.Text.RegularExpressions.Regex.IsMatch(o.ToString(), @"(sin|cos|tan|cot|sinh|cosh|tanh|ln|log|exp)([\^_](\([^()]*\)|[^\s()]+))*\s\z");
+                    o.Append(applied ? "〖(" + top + ")/(" + bottom + ")〗" : "(" + top + ")/(" + bottom + ")");
                     Gap(o, s, i);
                 }
                 else if (name == "sqrt")
@@ -1039,11 +1041,45 @@ static class Program
                 dynamic format = paragraph.Format;
                 if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f;
                 if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f;
-                if ((int)format.LineSpacingRule == 4) format.LineSpacingRule = 3;
             }
             catch (Exception) { }
         }
         Displays.Clear();
+    }
+
+    /// Set when an equation was built or an exact line height was set: the document is then checked by Roomy().
+    static bool Cramped;
+
+    /// An exact line height cuts off whatever is taller than it: fractions, sums, integrals. Every paragraph that
+    /// holds an equation and has an exact height gets the same height as a minimum instead, so its lines stay as they
+    /// are and only the ones with a tall formula grow. Paragraphs without equations keep the exact height.
+    static int Roomy(dynamic doc)
+    {
+        Cramped = false;
+        int changed = 0, last = -1;
+        try
+        {
+            int count = (int)doc.OMaths.Count;
+            for (int i = 1; i <= count; i++)
+            {
+                try
+                {
+                    dynamic paragraph = doc.OMaths[i].Range.Paragraphs[1];
+                    int start = (int)paragraph.Range.Start;
+                    if (start == last) continue;
+                    last = start;
+                    dynamic format = paragraph.Format;
+                    if ((int)format.LineSpacingRule != 4) continue;
+                    float height = (float)format.LineSpacing;
+                    format.LineSpacingRule = 3;
+                    format.LineSpacing = height;
+                    changed++;
+                }
+                catch (COMException) { }
+            }
+        }
+        catch (COMException) { }
+        return changed;
     }
 
     /// Formulas that could not be turned into equations during the current operation (they stay as text).
@@ -1080,6 +1116,7 @@ static class Program
                 math.OMaths[1].BuildUp();
                 if (display) { try { math.OMaths[1].Type = 0; math.OMaths[1].Justification = 1; } catch (COMException) { } }
                 if (display) { try { Displays.Add(math.OMaths[1].Range); } catch (Exception) { } }
+                Cramped = true;
                 return true;
             }
             catch (COMException) { return false; }
@@ -1295,7 +1332,7 @@ static class Program
         bool least = lower.Contains("least") || lower.Contains("min") || text.Contains("最小");
         bool points = least || lower.Contains("pt") || lower.Contains("exact") || lower.Contains("fixed") || text.Contains("磅") || text.Contains("固定") || value >= 5;
         if (!points) { format.LineSpacingRule = 5; format.LineSpacing = value * 12; }
-        else { format.LineSpacingRule = least ? 3 : 4; format.LineSpacing = value; }
+        else { format.LineSpacingRule = least ? 3 : 4; format.LineSpacing = value; if (!least) Cramped = true; }
     }
 
     /// A new empty paragraph where an insert operation points: after / before paragraph "para", or at the start / end.
@@ -1369,8 +1406,10 @@ static class Program
             to.LeftIndent = from.LeftIndent; to.RightIndent = from.RightIndent;
             to.CharacterUnitFirstLineIndent = from.CharacterUnitFirstLineIndent; to.FirstLineIndent = from.FirstLineIndent;
             to.SpaceBefore = from.SpaceBefore; to.SpaceAfter = from.SpaceAfter;
-            to.LineSpacingRule = from.LineSpacingRule;
-            if ((int)from.LineSpacingRule >= 3) to.LineSpacing = from.LineSpacing;
+            // Only where it differs: written when equal, it stays behind as the paragraph's own setting and
+            // no longer follows the style when that is changed later.
+            if ((int)to.LineSpacingRule != (int)from.LineSpacingRule) to.LineSpacingRule = from.LineSpacingRule;
+            if ((int)from.LineSpacingRule >= 3 && Math.Abs((float)to.LineSpacing - (float)from.LineSpacing) > 0.01f) to.LineSpacing = from.LineSpacing;
             dynamic font = paragraph.Range.Font, target = made.Range.Font;
             // 9999999 / empty mean "mixed" in the source paragraph: leave those to the style.
             string name = (string)font.Name, farEast = (string)font.NameFarEast;
@@ -2435,6 +2474,11 @@ static class Program
         }
         finally
         {
+            if (kind == "word" && Cramped)
+            {
+                int roomy = Roomy(doc);
+                if (roomy > 0) done.Add("(" + roomy + " paragraph(s) with formulas: exact line height turned into a minimum of the same height, so tall formulas are not cut off)");
+            }
             if (undo != null) { try { undo.EndCustomRecord(); } catch (COMException) { } }
         }
         if (card) Card.Hold = false;
