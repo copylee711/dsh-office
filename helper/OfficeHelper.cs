@@ -1676,6 +1676,18 @@ static class Program
         }
         if (spot == null) spot = doc.Range(start + m.Index, start + m.Index + m.Length);
         int at = (int)spot.Start, paragraphs = (int)doc.Paragraphs.Count, maths = (int)doc.OMaths.Count;
+        // The piece comes in as a paragraph of its own kind, and the line it joins takes that kind over: the style and
+        // the look the line had are written down first and given back afterwards.
+        string styleWas = null;
+        object[] look = null;
+        try
+        {
+            dynamic before = doc.Range(at, at).Paragraphs[1];
+            styleWas = (string)before.Style.NameLocal;
+            dynamic f = before.Format;
+            look = new object[] { f.Alignment, f.LeftIndent, f.RightIndent, f.FirstLineIndent, f.CharacterUnitFirstLineIndent, f.SpaceBefore, f.SpaceAfter, f.LineSpacingRule, f.LineSpacing };
+        }
+        catch (Exception) { }
         string omml = (string)made;
         if (display && !string.IsNullOrEmpty(tag)) omml = omml.Replace("</m:oMath>", "<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space=\"preserve\">\u2003\u2003(" + System.Security.SecurityElement.Escape(tag) + ")</m:t></m:r></m:oMath>");
         spot.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"center\"/></m:oMathParaPr>" + omml + "</m:oMathPara>" : omml));
@@ -1691,6 +1703,21 @@ static class Program
             }
             catch (Exception error) { Trace("formula in WPS, joining the line: " + error.Message.Trim()); }
         }
+        try
+        {
+            dynamic after = doc.Range(at, at).Paragraphs[1];
+            if (styleWas != null && (string)after.Style.NameLocal != styleWas) after.Style = styleWas;
+            if (look != null && !display)
+            {
+                dynamic f = after.Format;
+                f.Alignment = look[0]; f.LeftIndent = look[1]; f.RightIndent = look[2];
+                f.CharacterUnitFirstLineIndent = look[4]; f.FirstLineIndent = look[3];
+                f.SpaceBefore = look[5]; f.SpaceAfter = look[6];
+                if (Convert.ToInt32(f.LineSpacingRule) != Convert.ToInt32(look[7])) f.LineSpacingRule = look[7];
+                if (Convert.ToInt32(look[7]) >= 3) f.LineSpacing = look[8];
+            }
+        }
+        catch (Exception error) { Trace("formula in WPS, the look of the line: " + error.Message.Trim()); }
         if (display)
         {
             try { dynamic format = doc.Range(at, at).Paragraphs[1].Format; format.Alignment = 1; format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f; if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f; }
@@ -3283,6 +3310,7 @@ static class Program
         if (op.Has("wrap")) range.WrapText = op.Flag("wrap", false);
         if (op.On("border")) range.Borders.LineStyle = 1;
         if (op.On("merge")) range.Merge();
+        else if (op.Has("merge")) range.UnMerge();
         if (op.Has("columnWidth")) range.ColumnWidth = op.Num("columnWidth", 10);
         if (op.Has("rowHeight")) range.RowHeight = op.Num("rowHeight", 15);
     }
@@ -5414,7 +5442,21 @@ static class Program
         dynamic target = Slide(deck, op);
         GoTo(deck, op.Int("slide", 0));
         if (type == "delete_slide") { target.Delete(); Renumber = true; return "slide deleted"; }
-        if (type == "move_slide") { target.MoveTo(op.Int("to", 1)); return "slide moved to " + op.Int("to", 1); }
+        if (type == "move_slide")
+        {
+            int to = op.Int("to", 1), total = (int)deck.Slides.Count;
+            if (to < 1 || to > total) throw new Fail("BAD_ARGS", "\"to\" must be a slide number from 1 to " + total + ".");
+            target.MoveTo(to);
+            // WPS moves a slide forward to one place short of where it was told. Slides moved back land right in
+            // both suites, so the ones in between are moved back past it, one by one, until it stands at "to".
+            for (int guard = 0; guard < total && (int)target.SlideIndex < to; guard++)
+            {
+                int at = (int)target.SlideIndex;
+                deck.Slides[at + 1].MoveTo(at);
+            }
+            Renumber = true;
+            return "slide moved, it is slide " + (int)target.SlideIndex + " now (the slides between moved by one; page numbers updated)";
+        }
         if (type == "set_notes") { target.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("text") ?? ""); return "notes set"; }
         if (type == "add_textbox")
         {
@@ -6093,12 +6135,36 @@ static class Program
     }
 
     /// A picture shown whole inside the box, on a white card when it is a figure and the deck is not white itself.
+    /// The colour a figure stands on: its own, read at its four corners, so that a chart drawn on a dark ground does
+    /// not come to sit in a white frame. White when the corners differ, are see-through, or cannot be read.
+    static string Backdrop(string path)
+    {
+        try
+        {
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp" && ext != ".gif") return "#FFFFFF";
+            using (Bitmap bitmap = new Bitmap(path))
+            {
+                int w = bitmap.Width, h = bitmap.Height;
+                if (w < 8 || h < 8) return "#FFFFFF";
+                Color[] corners = { bitmap.GetPixel(2, 2), bitmap.GetPixel(w - 3, 2), bitmap.GetPixel(2, h - 3), bitmap.GetPixel(w - 3, h - 3) };
+                foreach (Color c in corners)
+                {
+                    if (c.A < 250) return "#FFFFFF";
+                    if (Math.Abs(c.R - corners[0].R) + Math.Abs(c.G - corners[0].G) + Math.Abs(c.B - corners[0].B) > 24) return "#FFFFFF";
+                }
+                return "#" + corners[0].R.ToString("X2") + corners[0].G.ToString("X2") + corners[0].B.ToString("X2");
+            }
+        }
+        catch (Exception) { return "#FFFFFF"; }
+    }
+
     static dynamic Figure(Page p, double x, double y, double w, double h, string path)
     {
         if (!File.Exists(path)) throw new Fail("BAD_ARGS", "Image \"" + path + "\" does not exist.");
         path = Path.GetFullPath(path);
         double pad = 10;
-        dynamic card = Block(p, x, y, w, h, "#FFFFFF", true);
+        dynamic card = Block(p, x, y, w, h, Backdrop(path), true);
         float bx = PX(p, x + pad), by = PY(p, y + pad), bw = SX(p, w - 2 * pad), bh = SY(p, h - 2 * pad);
         dynamic picture = p.Slide.Shapes.AddPicture(path, 0, -1, bx, by, -1, -1);
         picture.LockAspectRatio = -1;
@@ -7502,6 +7568,8 @@ static class Program
                 {
                     dynamic path = Track(p, builder.ConvertToShape());
                     path.Fill.Visible = 0;
+                    // WPS makes an open path without an outline, and a colour alone does not bring one.
+                    try { path.Line.Visible = -1; } catch (Exception) { }
                     path.Line.ForeColor.RGB = Bgr(tones[s]);
                     path.Line.Weight = 2.25f * p.S;
                     Dictionary<string, object> meant = series[s] as Dictionary<string, object>;
@@ -7920,6 +7988,8 @@ static class Program
                 {
                     dynamic path = Track(p, builder.ConvertToShape());
                     path.Fill.Visible = 0;
+                    // WPS makes an open path without an outline, and a colour alone does not bring one.
+                    try { path.Line.Visible = -1; } catch (Exception) { }
                     path.Line.ForeColor.RGB = Bgr(tones[s]);
                     path.Line.Weight = 2.25f * p.S;
                     p.Motion.Add(path);
