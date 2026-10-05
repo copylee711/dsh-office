@@ -151,7 +151,8 @@ Reading: office_read shows the first 60 rows; for a longer table it adds a profi
   · table {data:[[header..],[row..]..]} — up to 8 rows; cells may hold $formulas$.
   · formula {formulas:[{latex, label?}], points?} — 1 to 3 formulas on cards, explained underneath.
   · theorem {label?: "定理 2.1", name?, statement, proof?:[text | {head, text}], proofTitle?} — a definition, theorem, lemma or law set apart on a card, with the steps that lead to it (or what it means) underneath.
-  · gallery {images:[{image, caption?}] (2–6), text?} — pictures side by side with captions: the panels of an experiment, results to compare.
+  · gallery {images:[{image, caption?, focus?, fit?}] (2–6), text?} — pictures side by side with captions: the people of a story, the panels of an experiment, results to compare. Upright pictures (portraits) stand in one row; a last row that is not full stands in the middle.
+  · Photographs are cut to fill their place (split, gallery, cover, image, a photo beside bullets); of a tall picture the upper part is kept, where heads are. "focus": top | center | bottom | left | right on the slide (or on a gallery item) moves the cut; "fit": "contain" on a gallery item shows the picture whole. The result names the pictures that lost much: look at those slides.
   · summary {points:[{head, text}] (2–4)} — what to take away, numbered large; the first stands out.
   · code {code, language?, points?:[{head, text}]} — a listing on a dark panel with line numbers and coloured keywords, remarks beside it; 8–16 lines read best.
   · split {title, text?, points?, image, side?: left|right, kicker?} — half the slide is the picture, edge to edge; the words stand on the other half. A change of rhythm among content slides.
@@ -411,7 +412,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     output,
     timeoutMs: 60_000,
     async execute(args, exec): Promise<Value> {
-      const input = args as Target & { page?: number; slide?: number; to?: number; sheet?: string; range?: string; overview?: boolean }
+      // A copy: the arguments as they arrive cannot be written to.
+      const input = { ...(args as Target & { page?: number; slide?: number; to?: number; sheet?: string; range?: string; overview?: boolean }) }
       const on = target(input), kind = on.app
       // "page" is what a slide is called in the other apps: taken for the slide rather than refused.
       if (kind === 'ppt' && input.slide === undefined && typeof input.page === 'number') input.slide = input.page

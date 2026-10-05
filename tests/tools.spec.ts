@@ -119,6 +119,16 @@ describe('office tools', () => {
     expect(calls[1]!.args).toEqual({ app: 'word', doc: 'C:\\t\\new.docx' })
   })
 
+  it('takes "page" for the slide of a deck, also when the arguments cannot be written to', async () => {
+    const { calls, run } = setup((cmd, args) => {
+      if (cmd === 'render') { writeFileSync(String(args.out), 'png'); return { what: 'slide 5', width: 1100, height: 619 } }
+      return null
+    })
+    const shown = await run('office_render', Object.freeze({ doc: 'C:\t\a.pptx', page: 5 })) as { text: string }
+    expect(shown.text).toContain('slide 5')
+    expect(calls.filter(call => call.cmd === 'render')).toHaveLength(1)
+  })
+
   it('shows the pages on save when the model edited after it last looked', async () => {
     const { calls, run } = setup((cmd, args) => {
       if (cmd === 'edit') return { done: ['formatted'], total: 1 }

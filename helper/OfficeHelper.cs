@@ -5245,6 +5245,19 @@ static class Program
     }
 
     /// A picture that fills the box exactly: scaled to cover it, the overflow cropped away evenly.
+    /// Where the part of a cut picture is taken from when nothing is said: "top", "bottom", "left", "right", "center".
+    static string Focus = null;
+    /// Pictures of this batch that lost much to the cut, for the author to look at.
+    static List<string> Cut = new List<string>();
+
+    static string CutNote()
+    {
+        if (Cut.Count == 0) return "";
+        string note = "\nCut to fit: " + string.Join("; ", Cut.ToArray()) + ". Look at these (office_render): if a head or the subject is cut off, give the picture \"focus\": top | center | bottom | left | right, or \"fit\": \"contain\" to show it whole.";
+        Cut.Clear();
+        return note;
+    }
+
     static dynamic Photo(Page p, double x, double y, double w, double h, string path)
     {
         if (!File.Exists(path)) throw new Fail("BAD_ARGS", "Image \"" + path + "\" does not exist.");
@@ -5258,7 +5271,16 @@ static class Program
             dynamic crop = picture.PictureFormat.Crop;
             crop.ShapeWidth = bw; crop.ShapeHeight = bh; crop.ShapeLeft = bx; crop.ShapeTop = by;
             crop.PictureWidth = pw * scale; crop.PictureHeight = ph * scale;
-            crop.PictureOffsetX = 0; crop.PictureOffsetY = 0;
+            // What does not fit is cut away. Of a picture taller than its place the upper part is kept, a fifth down
+            // from the top: that is where heads are. The author may say otherwise.
+            float overX = pw * scale - bw, overY = ph * scale - bh;
+            string focus = (Focus ?? "").ToLowerInvariant();
+            float shareX = focus == "left" ? 0f : focus == "right" ? 1f : 0.5f;
+            float shareY = focus == "top" ? 0f : focus == "bottom" ? 1f : focus == "center" || focus == "centre" || focus == "middle" ? 0.5f : 0.2f;
+            crop.PictureOffsetX = overX * (0.5f - shareX);
+            crop.PictureOffsetY = overY * (0.5f - shareY);
+            double lost = 1 - (bw * bh) / (pw * scale * ph * scale);
+            if (lost > 0.4 && Cut.Count < 8) Cut.Add("\"" + Path.GetFileName(path) + "\" shows " + Math.Round((1 - lost) * 100) + "% of itself (" + (overY > overX ? "the " + (shareY < 0.4 ? "upper" : shareY > 0.6 ? "lower" : "middle") + " part of its height" : "the " + (shareX < 0.4 ? "left" : shareX > 0.6 ? "right" : "middle") + " part of its width") + ")");
         }
         catch (Exception)
         {
@@ -5301,6 +5323,8 @@ static class Program
     {
         try
         {
+            string kindOf = Path.GetExtension(path).ToLowerInvariant();
+            if (kindOf == ".jpg" || kindOf == ".jpeg" || kindOf == ".webp") return;   // photographs and scans come as these; drawings as png
             if (drawn <= 0 || shown <= 0 || IsSvg(path) || !IsFigure(path)) return;
             double scale = shown / drawn;
             if (scale >= (slide ? 0.68 : 0.62)) return;
@@ -5533,6 +5557,7 @@ static class Program
         try { p.Slide.Tags.Add("DSHKIND", kind); } catch (Exception) { }
 
         string image = op.Str("image", null);
+        Focus = op.Str("focus", null);
         if (kind == "cover" || kind == "closing")
         {
             bool cover = kind == "cover";
@@ -5783,7 +5808,7 @@ static class Program
         if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
         Move(p);
         Renumber = true;
-        return "slide " + index + " added (" + kind + ", theme " + t.Name + ")" + SmallNote();
+        return "slide " + index + " added (" + kind + ", theme " + t.Name + ")" + SmallNote() + CutNote();
     }
 
     /// The slide comes in with the deck's transition, and its parts follow one another in.
@@ -6262,17 +6287,39 @@ static class Program
         string text = op.Str("text", null);
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
         double foot = (string.IsNullOrEmpty(text) ? 0 : 46) + (callout ? 54 : 0);
-        int perRow = n <= 3 ? n : n == 4 ? 2 : 3, rows = (n + perRow - 1) / perRow;
+        // Upright pictures (portraits of people) stand in one row of upright places, so that little of them is cut;
+        // others go in rows of up to three.
+        double shape = 0;
+        int counted = 0;
+        for (int i = 0; i < n; i++)
+        {
+            string file = Field(images[i], "image") ?? Field(images[i], "path") ?? Field(images[i], "text");
+            double one = string.IsNullOrEmpty(file) || !File.Exists(file) ? 0 : Aspect(file);
+            if (one > 0) { shape += one; counted++; }
+        }
+        shape = counted > 0 ? shape / counted : 1.5;
+        int perRow = shape < 0.95 ? n : n <= 3 ? n : n == 4 ? 2 : 3, rows = (n + perRow - 1) / perRow;
         double gap = 16, cw = (w - gap * (perRow - 1)) / perRow, ch = (h - foot - gap * (rows - 1)) / rows;
+        // A single row of upright places need not be wider than its pictures ask for.
+        if (rows == 1 && shape < 0.95) cw = Math.Min(cw, (ch - 22) * Math.Max(shape * 1.15, 0.62));
+        string wanted = op.Str("focus", null);
+        // Captions too long for one line of their column get two, under every picture alike.
+        bool twoLines = false;
+        for (int i = 0; i < n; i++) { string said = Field(images[i], "caption") ?? Field(images[i], "head"); if (said != null && said.Length * 11.5 > cw + 12) twoLines = true; }
         for (int i = 0; i < n; i++)
         {
             Unit(p);
             object raw = images[i];
             string path = Field(raw, "image") ?? Field(raw, "path") ?? Field(raw, "text"), caption = Field(raw, "caption") ?? Field(raw, "head");
             if (string.IsNullOrEmpty(path)) throw new Fail("BAD_ARGS", "Picture " + (i + 1) + " of the gallery has no \"image\".");
-            double cx = x + (i % perRow) * (cw + gap), cy = y + (i / perRow) * (ch + gap), under = caption != null ? 22 : 0;
-            p.Motion.Add(IsFigure(path) ? Figure(p, cx, cy, cw, ch - under, path) : Photo(p, cx, cy, cw, ch - under, path));
-            if (caption != null) Label(p, cx, cy + ch - under + 4, cw, 16, caption, 9.5, t.Muted, false, t.BodyFont, 2, 1, t.Accent).Name = "Caption " + (i + 1);
+            // The last row may hold fewer: it stands in the middle, not at the left with a hole beside it.
+            int row = i / perRow, inRow = Math.Min(perRow, n - row * perRow);
+            double rowWidth = inRow * cw + (inRow - 1) * gap;
+            double cx = x + (w - rowWidth) / 2 + (i % perRow) * (cw + gap), cy = y + row * (ch + gap), under = caption != null ? (twoLines ? 36 : 22) : 0;
+            Focus = Field(raw, "focus") ?? wanted;
+            bool whole = Field(raw, "fit") == "contain" || (Field(raw, "fit") != "cover" && IsFigure(path));
+            p.Motion.Add(whole ? Figure(p, cx, cy, cw, ch - under, path) : Photo(p, cx, cy, cw, ch - under, path));
+            if (caption != null) Label(p, cx - 6, cy + ch - under + 4, cw + 12, twoLines ? 30 : 16, caption, 9.5, t.Muted, false, t.BodyFont, 2, 1, t.Accent).Name = "Caption " + (i + 1);
         }
         if (!string.IsNullOrEmpty(text)) { Unit(p); Label(p, x, y + h - foot + 6, w, 38, text, 13.5, t.Text, false, t.BodyFont, 2, 3, t.Accent).Name = "Text"; }
         Callout(p, op, x, y + h - 42, w);
@@ -6400,6 +6447,7 @@ static class Program
             {
                 string path = it.Str("image", it.Str("path", null));
                 if (path == null) throw new Fail("BAD_ARGS", "Item " + index + " of the canvas (image) needs \"image\": a path.");
+                Focus = it.Str("focus", null);
                 bool whole = type == "figure" || it.Str("fit", "") == "contain" || (type == "image" && it.Str("fit", "") != "cover" && IsFigure(path));
                 made = whole ? Figure(p, b[0], b[1], b[2], b[3], path) : Photo(p, b[0], b[1], b[2], b[3], path);
             }
@@ -7197,7 +7245,7 @@ static class Program
         {
             if (kind == "ppt")
             {
-                Advised = false; SmallOnSlide = false; Small.Clear();
+                Advised = false; SmallOnSlide = false; Small.Clear(); Cut.Clear(); Focus = null;
                 if (Renumber) Numbers(doc);
                 try { MathDone(); } catch (Exception) { }
                 if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
