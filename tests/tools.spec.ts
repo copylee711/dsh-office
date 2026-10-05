@@ -56,15 +56,33 @@ describe('office tools', () => {
   })
 
   it('registers the tools', () => {
-    expect(setup(() => null).tools.map(tool => tool.name)).toEqual(['office_open', 'office_status', 'office_read', 'office_edit', 'office_render', 'office_save', 'office_close'])
+    expect(setup(() => null).tools.map(tool => tool.name)).toEqual(['office_open', 'office_status', 'office_read', 'office_edit', 'office_help', 'office_render', 'office_save', 'office_close'])
   })
 
   it('opens by path and reports how', async () => {
     const { calls, run } = setup(() => ({ app: 'word', name: 'a.docx', path: 'C:\\t\\a.docx', saved: true, active: true, how: 'created' }))
     const result = await run('office_open', { path: 'C:\\t\\a.docx' })
     expect(calls[0]).toEqual({ cmd: 'open', args: { app: 'word', path: 'C:\\t\\a.docx', show: true, follow: true, typing: true, card: true } })
-    expect(result.text).toBe('Created C:\\t\\a.docx in Word (saved, active).')
+    expect(result.text.split('\n')[0]).toBe('Created C:\\t\\a.docx in Word (saved, active).')
     await expect(run('office_open', { path: 'relative.docx' })).rejects.toThrow(/absolute/)
+  })
+
+  it('hands over the operations of an app once, when it is first used, and again on request', async () => {
+    const { run, tools } = setup(cmd => cmd === 'open'
+      ? { app: 'word', name: 'a.docx', path: 'C:\\t\\a.docx', saved: true, active: true, how: 'created' }
+      : { paragraphs: [], total: 0, tables: 0, pages: 1 })
+    // The description sent with every request names no single operation's fields.
+    const edit = tools.find(tool => tool.name === 'office_edit')!
+    expect(edit.description).not.toContain('insert_table {')
+    expect(edit.description.length).toBeLessThan(1500)
+    const first = await run('office_open', { path: 'C:\\t\\a.docx' })
+    expect(first.text).toContain('insert_paragraphs {')
+    expect(first.text).not.toContain('add_smartart')
+    const again = await run('office_open', { path: 'C:\\t\\a.docx' })
+    expect(again.text).not.toContain('insert_paragraphs {')
+    const help = await run('office_help', { app: 'ppt' })
+    expect(help.text).toContain('add_smartart {')
+    expect(help.text).toContain('#RRGGBB')
   })
 
   it('passes a batch to the helper and reports where it stopped', async () => {
