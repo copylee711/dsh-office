@@ -562,7 +562,14 @@ static class Program
         }
         Type type = Type.GetTypeFromProgID(ProgId(kind));
         if (type == null) throw new Fail("NOT_INSTALLED", AppName(kind) + " is not installed on this computer.");
+        // A file opened from Explorer goes to the Word that was started first. Were that our hidden one, the document
+        // would pop into view there, with the user typing into what the agent is working on. So when no Word is
+        // running, one is started and ended ahead of ours: Explorer then starts a Word of its own, which finds the
+        // file in use and offers a read-only copy — as Excel does by itself.
+        dynamic decoy = null;
+        if (kind == "word" && Running(kind) == null) { try { decoy = Activator.CreateInstance(type); } catch (Exception) { decoy = null; } }
         dynamic app = Activator.CreateInstance(type);
+        if (decoy != null) { try { decoy.Quit(); } catch (Exception) { } decoy = null; GC.Collect(); GC.WaitForPendingFinalizers(); }
         try { app.Visible = false; } catch (Exception) { }
         try { if (kind == "word") app.DisplayAlerts = 0; else app.DisplayAlerts = false; } catch (Exception) { }
         if (kind == "excel") { try { NoteOwn(Convert.ToInt64(app.Hwnd)); } catch (Exception) { } }
@@ -662,6 +669,16 @@ static class Program
                     bool unsaved = !Truthy(doc.Saved) && ((string)doc.Path).Length > 0;
                     // No one can see this document, so work left unsaved would simply be lost: it is kept.
                     if (unsaved) { if (kind == "word") FinishMath(doc); doc.Save(); }
+                    // The user opened it meanwhile and is looking at it: it is theirs now, saved but not closed.
+                    bool watched = false;
+                    try { watched = kind == "ppt" ? (int)doc.Windows.Count > 0 : Truthy(app.Visible); } catch (Exception) { }
+                    if (watched)
+                    {
+                        Hidden.Remove(full);
+                        Revealed.Add(full);
+                        said.Add((unsaved ? "saved " : "left open ") + full + " (the user has it on screen)");
+                        continue;
+                    }
                     if (kind == "word") doc.Close(0); else if (kind == "excel") doc.Close(false); else { doc.Saved = -1; doc.Close(); }
                     said.Add((unsaved ? "saved and closed " : "closed ") + full);
                 }
@@ -4197,9 +4214,17 @@ static class Program
         if (type == "table")
         {
             dynamic data = Data(ws, op);
-            dynamic table = ws.ListObjects.Add(1, data, Type.Missing, 1);
+            dynamic home = data.Worksheet;
+            dynamic table = null;
+            foreach (dynamic existing in home.ListObjects)
+            {
+                try { if (app.Intersect(existing.Range, data) != null) { table = existing; break; } } catch (Exception) { }
+            }
+            bool made = table == null;
+            if (made) table = home.ListObjects.Add(1, data, Type.Missing, 1);
             if (op.Has("name")) { try { table.Name = op.Need("name"); } catch (Exception) { } }
             try { table.TableStyle = op.Str("style", "TableStyleMedium2"); } catch (Exception) { }
+            if (!made) return "these cells are a table already (\"" + (string)table.Name + "\" at " + (string)table.Range.Address[false, false] + "): its style was set" + (op.Has("name") ? " and it was renamed" : "");
             return "table \"" + (string)table.Name + "\" made of " + (string)data.Address[false, false] + " (banded rows, filter arrows, formulas may use its column names)";
         }
         if (type == "conditional_format")
