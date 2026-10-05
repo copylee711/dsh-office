@@ -147,7 +147,7 @@ class Card : Form
     public static volatile bool Hold;
 
     string line = "";
-    DateTime shown = DateTime.MinValue;
+    DateTime until = DateTime.MinValue;
     readonly float scale;
     Rectangle followBox, typingBox;
     Point grip;
@@ -158,6 +158,27 @@ class Card : Form
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr handle);
+
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr handle, IntPtr none);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+
+    /// Bring a window to the front. Windows lets a program do that only in some situations; sharing the input
+    /// queue of the window now in front for the moment of the call is the way that always holds.
+    static void Front(IntPtr window)
+    {
+        IntPtr now = GetForegroundWindow();
+        if (now == window) return;
+        uint mine = GetCurrentThreadId(), theirs = now != IntPtr.Zero ? GetWindowThreadProcessId(now, IntPtr.Zero) : 0;
+        bool joined = theirs != 0 && theirs != mine && AttachThreadInput(mine, theirs, true);
+        try
+        {
+            BringWindowToTop(window);
+            SetForegroundWindow(window);
+        }
+        finally { if (joined) AttachThreadInput(mine, theirs, false); }
+    }
 
     /// The user is looking at the document: its window is the foreground one.
     static bool Watching()
@@ -210,7 +231,8 @@ class Card : Form
             }
             bool nowLit = Program.Following && watching;
             if (nowLit != lit) { lit = nowLit; Invalidate(); }
-            if (Visible && !Hold && (DateTime.UtcNow - shown).TotalSeconds > 1) Hide();
+            if (Visible && !Hold && DateTime.UtcNow > until) Hide();
+            Program.Trace("card visible " + Visible + " hold " + Hold + " following " + Program.Following + " watching " + watching);
         };
         timer.Start();
     }
@@ -273,7 +295,14 @@ class Card : Form
     {
         pressed = false;
         if (dragged) return;
-        if (followBox.Contains(e.Location))
+        if (followBox.Contains(e.Location)) ToggleFollow();
+        else if (typingBox.Contains(e.Location)) { Program.Typing = !Program.Typing; TypingChosen = true; }
+        if (until < DateTime.UtcNow.AddSeconds(4)) until = DateTime.UtcNow.AddSeconds(4);
+        Invalidate();
+    }
+
+    void ToggleFollow()
+    {
         {
             FollowChosen = true;
             if (Program.Following && Watching()) Program.Following = false;
@@ -286,13 +315,28 @@ class Card : Form
                 if (doc != IntPtr.Zero)
                 {
                     if (IsIconic(doc)) ShowWindow(doc, 9);
-                    SetForegroundWindow(doc);
+                    Front(doc);
                 }
             }
         }
-        else if (typingBox.Contains(e.Location)) { Program.Typing = !Program.Typing; TypingChosen = true; }
-        shown = DateTime.UtcNow;
-        Invalidate();
+    }
+
+    /// For checks: what the card is showing, and optionally a press of the follow switch.
+    public static string Probe(bool press)
+    {
+        Card card = instance;
+        if (card == null) return "no card";
+        string state = "";
+        ManualResetEvent done = new ManualResetEvent(false);
+        card.BeginInvoke(new MethodInvoker(delegate
+        {
+            if (press) { card.ToggleFollow(); card.Invalidate(); }
+            state = "visible " + card.Visible + " at " + card.Bounds + " line \"" + card.line + "\" following " + Program.Following + " window " + Program.DocWindow;
+            done.Set();
+        }));
+        done.WaitOne(3000);
+        Thread.Sleep(400);
+        return state + " foreground " + GetForegroundWindow() + " watching " + Watching();
     }
 
     public static void Start()
@@ -311,7 +355,10 @@ class Card : Form
     }
 
     /// Show the card (if it is not up yet) with this line; it goes away by itself a few seconds after the last report.
-    public static void Report(string text)
+    public static void Report(string text) { Report(text, 1); }
+
+    /// seconds: how long the card stays after this, when no edit is holding it up.
+    public static void Report(string text, double seconds)
     {
         Card card = instance;
         if (card == null) return;
@@ -320,7 +367,7 @@ class Card : Form
             card.BeginInvoke(new MethodInvoker(delegate
             {
                 card.line = text;
-                card.shown = DateTime.UtcNow;
+                card.until = DateTime.UtcNow.AddSeconds(seconds);
                 if (!card.Visible) ShowWindow(card.Handle, 4);
                 card.Invalidate();
             }));
@@ -539,6 +586,7 @@ static class Program
     static object Run(string cmd, Bag a)
     {
         if (cmd == "ping") return "pong";
+        if (cmd == "card" && a.Has("probe")) return Card.Probe(a.Flag("press", false));
         if (cmd == "card")
         {
             // The agent's turn ended: say so and let the card go.
@@ -560,6 +608,14 @@ static class Program
         dynamic app = App(kind, false);
         WaitReady(kind, app);
         dynamic doc = Doc(kind, app, a);
+        if (cardStarted && CardOn && (cmd == "read" || cmd == "render" || cmd == "save"))
+        {
+            // Between edits the agent reads and looks: the card stays, and its switch still leads to the document.
+            Remember(doc);
+            string name = "";
+            try { name = (string)doc.Name; } catch (Exception) { }
+            Card.Report((cmd == "save" ? "AI 已保存 " : cmd == "render" ? "AI 正在检查 " : "AI 正在读取 ") + name, Linger);
+        }
         if (cmd == "read") return kind == "word" ? WordRead(doc, a) : kind == "excel" ? ExcelRead(doc, a) : PptRead(doc, a);
         if (cmd == "edit") return Edit(kind, app, doc, a);
         if (cmd == "render") return Render(kind, app, doc, a);
@@ -660,7 +716,10 @@ static class Program
             if (!cardStarted) { cardStarted = true; Card.Start(); }
             Following = Card.FollowChosen ? Following : a.Flag("follow", false);
             Typing = Card.TypingChosen ? Typing : a.Flag("typing", false);
-            // No card here: it shows while an edit is running.
+            CardOn = true;
+            string opened = "";
+            try { opened = (string)doc.Name; } catch (Exception) { }
+            Card.Report("AI 已打开 " + opened, Linger);
         }
         return info;
     }
@@ -794,22 +853,70 @@ static class Program
     /// The window of the document being worked on (0 when unknown), for the card to bring forward.
     public static IntPtr DocWindow = IntPtr.Zero;
 
+    public static void Trace(string text)
+    {
+        if (Environment.GetEnvironmentVariable("DSH_OFFICE_DEBUG") == "1") Console.Error.WriteLine("TRACE " + text);
+    }
+
+    delegate bool EachWindow(IntPtr window, IntPtr state);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr state);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder text, int max);
+
+    /// The top-level window that shows a document, found by its caption among the windows of the app's process.
+    /// PowerPoint does not always hand out the window of a presentation; its frame carries the file name.
+    static IntPtr WindowOf(dynamic doc)
+    {
+        string name = "";
+        try { name = (string)doc.Name; } catch (Exception) { }
+        if (name.Length == 0) return IntPtr.Zero;
+        string bare = Path.GetFileNameWithoutExtension(name);
+        uint owner = 0;
+        try { GetWindowThreadProcessId(new IntPtr(Convert.ToInt64(doc.Application.HWND)), out owner); } catch (Exception) { }
+        IntPtr best = IntPtr.Zero;
+        int bestScore = 0;
+        EnumWindows(delegate(IntPtr window, IntPtr state)
+        {
+            if (!IsWindowVisible(window)) return true;
+            StringBuilder caption = new StringBuilder(512), kind = new StringBuilder(128);
+            GetWindowText(window, caption, 512);
+            string title = caption.ToString();
+            if (title.IndexOf(bare, StringComparison.OrdinalIgnoreCase) < 0) return true;
+            GetClassName(window, kind, 128);
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            string type = kind.ToString();
+            bool frame = type == "PPTFrameClass" || type == "OpusApp" || type == "XLMAIN";
+            if (!frame && (owner == 0 || pid != owner)) return true;
+            int score = (frame ? 4 : 0) + (owner != 0 && pid == owner ? 2 : 0) + (title.StartsWith(name, StringComparison.OrdinalIgnoreCase) || title.StartsWith(bare, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
+            if (score > bestScore) { bestScore = score; best = window; }
+            return true;
+        }, IntPtr.Zero);
+        return best;
+    }
+
     static void Remember(dynamic doc)
     {
-        try
-        {
-            IntPtr window = new IntPtr(Convert.ToInt64(doc.Windows[1].Hwnd));
-            // PowerPoint hands out the pane inside its frame; the frame is what comes to the front and what
-            // "the user is looking at it" is checked against.
-            IntPtr root = GetAncestor(window, 2);
-            DocWindow = root != IntPtr.Zero ? root : window;
-        }
-        catch (Exception) { DocWindow = IntPtr.Zero; }
+        IntPtr window = IntPtr.Zero;
+        try { window = new IntPtr(Convert.ToInt64(doc.Windows[1].HWND)); }
+        catch (Exception error) { Trace("no window handle from the document: " + error.GetType().Name); }
+        // PowerPoint hands out the pane inside its frame; the frame is what comes to the front and what
+        // "the user is looking at it" is checked against.
+        IntPtr root = window != IntPtr.Zero ? GetAncestor(window, 2) : IntPtr.Zero;
+        if (root == IntPtr.Zero) root = window;
+        if (root == IntPtr.Zero) { try { root = WindowOf(doc); } catch (Exception) { } }
+        DocWindow = root;
+        Trace("document window " + window + " frame " + root);
     }
     /// Write text a few characters at a time, the way a person types, instead of all at once.
     public static volatile bool Typing;
 
     static bool cardStarted;
+    /// Whether the user wants the card (the setting, as of the last edit).
+    static bool CardOn;
+    /// How long the card stays after a step, in seconds: about the pause between two steps of the agent.
+    const double Linger = 25;
 
     static void Follow(dynamic doc, dynamic range)
     {
@@ -1285,6 +1392,9 @@ static class Program
                             line.OMaths[1].Linearize();
                             value = ((string)MathDoc.Paragraphs[i + 1].Range.OMaths[1].Range.Text ?? "").TrimEnd('\r');
                             if (value.Length == 0) value = null;
+                            // Word writes the hat and the tilde of LaTeX as characters that stand beside the letter;
+                            // read back, they would not go over it. The combining ones do.
+                            if (value != null) value = value.Replace(" ˆ", " ̂").Replace(" ˜", " ̃").Replace(" ˇ", " ̌").Replace(" ˘", " ̆").Replace(" ´", " ́");
                         }
                         catch (COMException) { value = null; }
                     }
@@ -1749,6 +1859,145 @@ static class Program
         try { paragraph.Range.Font.Reset(); paragraph.Range.ParagraphFormat.Reset(); } catch (COMException) { }
     }
 
+    static bool IsCaption(dynamic doc, dynamic para)
+    {
+        try
+        {
+            string style = (string)para.Style.NameLocal;
+            if (style.IndexOf("Caption", StringComparison.OrdinalIgnoreCase) >= 0 || style.Contains("\u9898\u6ce8")) return true;
+        }
+        catch (Exception) { }
+        return false;
+    }
+
+    /// Where a figure (index > 0, with the empty paragraphs before it and its caption after it) or a table
+    /// (index < 0, with its caption before it) begins and ends in the document.
+    static bool Block(dynamic doc, int index, out int start, out int end)
+    {
+        start = 0; end = 0;
+        if (index > 0)
+        {
+            dynamic para = doc.InlineShapes[index].Range.Paragraphs[1];
+            try { if (Truthy(para.Range.Information[12])) return false; } catch (Exception) { }
+            dynamic first = para, before = para.Previous();
+            while (before != null && ((string)before.Range.Text ?? "").Trim().Length == 0 && (int)before.Range.InlineShapes.Count == 0) { first = before; before = before.Previous(); }
+            dynamic last = para, after = para.Next();
+            if (after != null && IsCaption(doc, after)) last = after;
+            start = (int)first.Range.Start; end = (int)last.Range.End;
+            Widen(doc, ref start, ref end);
+            return true;
+        }
+        dynamic table = doc.Tables[-index];
+        start = (int)table.Range.Start; end = (int)table.Range.End;
+        if (start > 0)
+        {
+            dynamic above = doc.Range(start - 1, start - 1).Paragraphs[1];
+            if (IsCaption(doc, above)) start = (int)above.Range.Start;
+        }
+        Widen(doc, ref start, ref end);
+        return true;
+    }
+
+    /// Figures and tables that follow one another directly move as one.
+    static void Absorb(dynamic doc, ref int start, ref int end)
+    {
+        for (int guard = 0; guard < 4; guard++)
+        {
+            int last = (int)doc.Content.End;
+            if (end >= last - 1) return;
+            dynamic next = doc.Range(end, end).Paragraphs[1];
+            int to = 0;
+            if (Truthy(next.Range.Information[12])) to = (int)next.Range.Tables[1].Range.End;
+            else if ((int)next.Range.InlineShapes.Count > 0)
+            {
+                to = (int)next.Range.End;
+                dynamic caption = next.Next();
+                if (caption != null && IsCaption(doc, caption)) to = (int)caption.Range.End;
+            }
+            else if (IsCaption(doc, next))
+            {
+                dynamic under = next.Next();
+                if (under != null && Truthy(under.Range.Information[12])) to = (int)under.Range.Tables[1].Range.End;
+            }
+            if (to <= end) return;
+            end = to;
+            Widen(doc, ref start, ref end);
+        }
+    }
+
+    /// Empty paragraphs around a figure or table belong to it: they are its spacing.
+    static void Widen(dynamic doc, ref int start, ref int end)
+    {
+        int last = (int)doc.Content.End;
+        for (int guard = 0; guard < 6 && start > 0; guard++)
+        {
+            dynamic above = doc.Range(start - 1, start - 1).Paragraphs[1];
+            if (((string)above.Range.Text ?? "").Trim().Length > 0 || (int)above.Range.InlineShapes.Count > 0 || Truthy(above.Range.Information[12])) break;
+            start = (int)above.Range.Start;
+        }
+        for (int guard = 0; guard < 6 && end < last - 1; guard++)
+        {
+            dynamic below = doc.Range(end, end).Paragraphs[1];
+            if (((string)below.Range.Text ?? "").Trim().Length > 0 || (int)below.Range.InlineShapes.Count > 0 || Truthy(below.Range.Information[12])) break;
+            end = (int)below.Range.End;
+        }
+    }
+
+    /// A figure or table that does not fit under the text before it goes to the next page and leaves the rest of
+    /// the page empty. As a typesetter would, the paragraphs that follow it are brought before it until the page is full.
+    static string FillGaps(dynamic doc)
+    {
+        int moved = 0, blocks = 0, figures = (int)doc.InlineShapes.Count, tables = (int)doc.Tables.Count;
+        List<int> all = new List<int>();
+        for (int i = 1; i <= figures; i++) all.Add(i);
+        for (int i = 1; i <= tables; i++) all.Add(-i);
+        int docEnd = 0;
+        foreach (int index in all)
+        {
+            int here = 0;
+            bool more = false;   // the paragraph just moved announces what follows it (it ends with a colon)
+            for (int step = 0; step < 8; step++)
+            {
+                int start, end;
+                try { if (!Block(doc, index, out start, out end)) break; } catch (Exception) { break; }
+                docEnd = (int)doc.Content.End;
+                if (start <= 0 || end >= docEnd - 1) break;
+                dynamic before = doc.Range(start - 1, start - 1).Paragraphs[1];
+                if (!more)
+                {
+                    if ((int)before.OutlineLevel != 10) break;
+                    dynamic tip = doc.Range(start - 1, start - 1), head = doc.Range(start, start);
+                    if ((int)head.Information[3] <= (int)tip.Information[3]) break;
+                    dynamic setup = before.Range.Sections[1].PageSetup;
+                    double bottom = (double)setup.PageHeight - (double)setup.BottomMargin;
+                    double gap = bottom - Convert.ToDouble(tip.Information[6]) - 20;
+                    Trace("block " + index + " pages " + (int)tip.Information[3] + "/" + (int)head.Information[3] + " gap " + gap);
+                    if (gap < Math.Max(90, (bottom - (double)setup.TopMargin) * 0.12)) break;
+                }
+                Absorb(doc, ref start, ref end);
+                if (end >= docEnd - 1) break;
+                dynamic after = doc.Range(end, end).Paragraphs[1];
+                string text = ((string)after.Range.Text ?? "").Trim();
+                if (text.Length == 0 || (int)after.OutlineLevel != 10 || (int)after.Range.InlineShapes.Count > 0 || IsCaption(doc, after)) break;
+                try { if (Truthy(after.Range.Information[12])) break; } catch (Exception) { }
+                // A paragraph that is a list item or the last one before a heading moves like any other; what must not
+                // happen is text jumping over a heading, and that is excluded above.
+                doc.Range(start, start).FormattedText = after.Range.FormattedText;
+                // The block moved down by what was put before it: find it, and what follows it, again.
+                if (!Block(doc, index, out start, out end)) break;
+                Absorb(doc, ref start, ref end);
+                doc.Range(end, end).Paragraphs[1].Range.Delete();
+                moved++; here++;
+                more = text.EndsWith(":", StringComparison.Ordinal) || text.EndsWith("\uff1a", StringComparison.Ordinal);
+            }
+            if (here > 0) blocks++;
+        }
+        if (moved == 0) return "no page is left part-empty before a figure or table that text could be moved up to fill";
+        return moved + " paragraph(s) brought before " + blocks + " figure(s) / table(s) to fill the space that was left empty at the foot of the page before them; look at those pages";
+    }
+
+    static bool Nested;   // a picture or table being put in from inside insert_paragraphs
+
     static string WordOp(dynamic doc, string type, Bag op)
     {
         if (type == "replace_text")
@@ -1809,7 +2058,8 @@ static class Program
                         if (place.Has("expect")) inner["expect"] = place.Raw("expect");
                         tail = where == "end" || (before == 1 && (string)doc.Paragraphs[1].Range.Text == "\r") ? 0 : where == "start" ? before : where == "before" ? before - para + 1 : before - para;
                     }
-                    WordOp(doc, nested, new Bag(inner));
+                    Nested = true;
+                    try { WordOp(doc, nested, new Bag(inner)); } finally { Nested = false; }
                     // Where the text goes on: after what was just put in.
                     int end = (int)doc.Paragraphs.Count - tail;
                     Dictionary<string, object> next = new Dictionary<string, object>();
@@ -1851,8 +2101,10 @@ static class Program
                     made++;
                 }
             }
+            // The batch may end on a picture or a table: then there is no last paragraph of text to count from.
+            if (current == null) return "inserted " + made + " item(s), " + (int)doc.Paragraphs.Count + " paragraphs now" + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint + SmallNote();
             int lastIndex = Index(doc, current);
-            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint;
+            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint + SmallNote();
         }
         if ((type == "set_text" || (type == "delete_range" && op.Has("para"))) && op.Raw("expect") == null)
         {
@@ -1995,13 +2247,16 @@ static class Program
             Follow(doc, p.Range);
             dynamic picture = p.Range.InlineShapes.AddPicture(FileName: path, LinkToFile: false, SaveWithDocument: true);
             Cramped = true;
+            float drawn = 0;
+            try { drawn = (float)picture.Width * 100f / Math.Max(1f, (float)picture.ScaleWidth); } catch (Exception) { }
             if (op.Has("width")) { picture.LockAspectRatio = -1; picture.Width = (float)op.Points("width", 300); }
+            try { Lettering(path, (float)picture.Width, drawn, false); } catch (Exception) { }
             try { p.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; p.Range.ParagraphFormat.FirstLineIndent = 0; p.Range.ParagraphFormat.Alignment = 1; } catch (COMException) { }
             WordFormat(p.Range, StyleLess(op));
             p.Range.ParagraphFormat.SpaceBefore = Air;
             if (op.Has("caption")) Caption(doc, picture.Range, false, op.Need("caption"), bodyFont, bodyFarEast);
             else p.Range.ParagraphFormat.SpaceAfter = Air;
-            return "image inserted";
+            return "image inserted" + (Nested ? "" : SmallNote());
         }
         if (type == "insert_references") return References(doc, op);
         if (type == "style_format") return StyleFormat(doc, op);
@@ -2022,6 +2277,7 @@ static class Program
             if (op.Has("size")) header.Font.Size = (float)op.Num("size", 9);
             return "page header set";
         }
+        if (type == "fill_gaps") return FillGaps(doc);
         if (type == "update_fields") { Refresh(doc); return "table of contents and cross-references refreshed"; }
         if (type == "format_table")
         {
@@ -3104,7 +3360,7 @@ static class Program
     static void GoTo(dynamic deck, int slide)
     {
         if (!Following) return;
-        try { deck.Windows[1].View.GotoSlide(slide); } catch (Exception) { }
+        try { deck.Windows[1].View.GotoSlide(slide); } catch (Exception error) { Trace("goto slide failed: " + error.GetType().Name); }
     }
 
     static void PptText(dynamic shape, Bag op)
@@ -3282,6 +3538,7 @@ static class Program
             string path = op.Need("path");
             if (!File.Exists(path)) throw new Fail("BAD_ARGS", "Image \"" + path + "\" does not exist.");
             dynamic picture = target.Shapes.AddPicture(Path.GetFullPath(path), 0, -1, (float)op.Num("left", 60), (float)op.Num("top", 60), -1, -1);
+            float drawn = (float)picture.Width;
             if (op.Has("width") || op.Has("height"))
             {
                 picture.LockAspectRatio = op.Has("width") && op.Has("height") ? 0 : -1;
@@ -3289,7 +3546,9 @@ static class Program
                 if (op.Has("height")) picture.Height = (float)op.Num("height", 100);
             }
             if (op.Has("name")) picture.Name = op.Need("name");
-            return "picture \"" + (string)picture.Name + "\" added";
+            Lettering(path, (float)picture.Width, drawn, true);
+            float sw = (float)deck.PageSetup.SlideWidth, sh = (float)deck.PageSetup.SlideHeight;
+            return "picture \"" + (string)picture.Name + "\" added at [" + Math.Round((float)picture.Left) + ", " + Math.Round((float)picture.Top) + ", " + Math.Round((float)picture.Width) + ", " + Math.Round((float)picture.Height) + "], " + Math.Round(100 * (float)picture.Width * (float)picture.Height / (sw * sh)) + "% of the slide" + SmallNote();
         }
         if (type == "duplicate_slide")
         {
@@ -3721,8 +3980,66 @@ static class Program
     }
 
     /// A drawing or chart on a plain light ground, as opposed to a photograph: its four corners are the same light colour.
+    static bool IsSvg(string path) { return path.EndsWith(".svg", StringComparison.OrdinalIgnoreCase); }
+
+    /// Width over height of a picture file; 0 when it cannot be told.
+    static double Aspect(string path)
+    {
+        try
+        {
+            if (IsSvg(path))
+            {
+                string text = File.ReadAllText(path);
+                int at = text.IndexOf("<svg", StringComparison.OrdinalIgnoreCase);
+                if (at < 0) return 0;
+                string tag = text.Substring(at, Math.Max(0, text.IndexOf('>', at) - at));
+                System.Text.RegularExpressions.Match box = System.Text.RegularExpressions.Regex.Match(tag, "viewBox\\s*=\\s*[\"']\\s*[-\\d.]+[\\s,]+[-\\d.]+[\\s,]+([\\d.]+)[\\s,]+([\\d.]+)");
+                if (!box.Success) box = System.Text.RegularExpressions.Regex.Match(tag, "width\\s*=\\s*[\"']([\\d.]+)[a-z]*[\"'][^>]*?height\\s*=\\s*[\"']([\\d.]+)");
+                if (!box.Success) return 0;
+                double bw = double.Parse(box.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), bh = double.Parse(box.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+                return bh > 0 ? bw / bh : 0;
+            }
+            using (Bitmap bitmap = new Bitmap(path)) return bitmap.Height > 0 ? (double)bitmap.Width / bitmap.Height : 0;
+        }
+        catch (Exception) { return 0; }
+    }
+
+    /// Said once per batch about drawings whose lettering ends up too small to read where they were put.
+    static List<string> Small = new List<string>();
+    static bool Advised, SmallOnSlide;   // the advice is given once per batch
+
+    /// shown / drawn = how much a drawing was scaled; much under 1, a chart drawn with 10 pt type is no longer readable.
+    static void Lettering(string path, double shown, double drawn, bool slide)
+    {
+        try
+        {
+            if (drawn <= 0 || shown <= 0 || IsSvg(path) || !IsFigure(path)) return;
+            double scale = shown / drawn;
+            if (scale >= (slide ? 0.68 : 0.62)) return;
+            if (slide) SmallOnSlide = true;
+            string name = Path.GetFileName(path);
+            foreach (string said in Small) if (said.StartsWith("\"" + name + "\"", StringComparison.Ordinal)) return;
+            Small.Add("\"" + name + "\" is shown at " + Math.Round(scale * 100) + "% of the size it was drawn at (10 pt lettering in it reads as " + Math.Round(10 * scale, 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + " pt; it is " + Math.Round(shown / 72, 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + " in wide here)");
+        }
+        catch (Exception) { }
+    }
+
+    static string SmallNote()
+    {
+        if (Small.Count == 0) return "";
+        string note = "\nFigures: " + string.Join("; ", Small.ToArray()) + ".";
+        if (!Advised)
+        {
+            note += " Lettering that small is hard to read" + (SmallOnSlide ? " (a slide wants 12 pt or more)" : "") + ": a drawing you made yourself is better drawn again at the width it is shown at, with type sized for that width, and a drawing with several panels side by side split into one per panel" + (SmallOnSlide ? "; on a slide, kind image gives a drawing the whole width" : "") + ".";
+            Advised = true;
+        }
+        Small.Clear();
+        return note;
+    }
+
     static bool IsFigure(string path)
     {
+        if (IsSvg(path)) return true;
         try
         {
             using (Bitmap bitmap = new Bitmap(path))
@@ -3752,6 +4069,7 @@ static class Program
         dynamic picture = p.Slide.Shapes.AddPicture(path, 0, -1, bx, by, -1, -1);
         picture.LockAspectRatio = -1;
         float pw = (float)picture.Width, ph = (float)picture.Height, scale = Math.Min(bw / pw, bh / ph);
+        Lettering(path, pw * scale, pw, true);
         picture.Width = pw * scale;
         picture.Left = bx + (bw - pw * scale) / 2;
         picture.Top = by + (bh - ph * scale) / 2;
@@ -3759,7 +4077,7 @@ static class Program
     }
 
     /// A veil over a picture so that text on it reads: the colour, strong at one side and fading to the other.
-    /// direction 1 fades left to right, 2 top to bottom. Drawn as strips, each a little clearer than the last.
+    /// direction 1 fades left to right, 2 top to bottom. It is a picture a few dots wide, stretched over the place.
     static void Veil(Page p, double x, double y, double w, double h, string colour, int direction, double strong, double weak)
     {
         if (Math.Abs(strong - weak) < 0.02)
@@ -3768,17 +4086,28 @@ static class Program
             try { flat.Fill.Transparency = (float)(1 - strong); } catch (Exception) { }
             return;
         }
-        const int strips = 24;
-        for (int i = 0; i < strips; i++)
+        string file = Path.Combine(Path.GetTempPath(), "dsh-office-veil-" + Guid.NewGuid().ToString("N") + ".png");
+        try
         {
-            double share = (i + 0.5) / strips, opacity = strong + (weak - strong) * share;
-            if (opacity < 0.015) continue;
-            // A hair of overlap, so no seam shows between two strips.
-            dynamic strip = direction == 1
-                ? Block(p, x + w * i / strips, y, w / strips + 0.6, h, colour, false)
-                : Block(p, x, y + h * i / strips, w, h / strips + 0.6, colour, false);
-            try { strip.Fill.Transparency = (float)(1 - opacity); } catch (Exception) { }
+            Color tone = ColorTranslator.FromHtml(colour);
+            const int steps = 256;
+            using (Bitmap bitmap = new Bitmap(direction == 1 ? steps : 2, direction == 1 ? 2 : steps, PixelFormat.Format32bppArgb))
+            {
+                for (int i = 0; i < steps; i++)
+                {
+                    double share = i / (double)(steps - 1), eased = share * share * (3 - 2 * share);
+                    int alpha = (int)Math.Round(255 * Math.Max(0, Math.Min(1, strong + (weak - strong) * eased)));
+                    Color dot = Color.FromArgb(alpha, tone.R, tone.G, tone.B);
+                    if (direction == 1) { bitmap.SetPixel(i, 0, dot); bitmap.SetPixel(i, 1, dot); }
+                    else { bitmap.SetPixel(0, i, dot); bitmap.SetPixel(1, i, dot); }
+                }
+                bitmap.Save(file, ImageFormat.Png);
+            }
+            dynamic picture = p.Slide.Shapes.AddPicture(file, 0, -1, PX(p, x), PY(p, y), SX(p, w), SY(p, h));
+            picture.Name = "Veil";
+            Track(p, picture);
         }
+        finally { try { File.Delete(file); } catch (Exception) { } }
     }
 
     static string Field(object raw, string key)
@@ -3971,6 +4300,22 @@ static class Program
         else if (kind == "image")
         {
             if (image == null) throw new Fail("BAD_ARGS", "An image slide needs \"image\": the path of a picture.");
+            if (IsFigure(image))
+            {
+                // A chart or diagram is not cropped to fill the slide: it is shown whole, as large as the slide lets it be.
+                string words = op.Str("text", null), under = op.Str("caption", null);
+                double top = Head(p, op), foot = (string.IsNullOrEmpty(words) ? 0 : 46) + (string.IsNullOrEmpty(under) ? 0 : 20);
+                p.Current = null;
+                Unit(p);
+                p.Motion.Add(Figure(p, 48, top, 864, BodyBottom - top - foot, image));
+                double fy = BodyBottom - foot;
+                if (!string.IsNullOrEmpty(under)) { Label(p, 48, fy + 2, 864, 16, under, 10.5, t.Muted, false, t.BodyFont, 2, 1, null).Name = "Caption"; fy += 20; }
+                if (!string.IsNullOrEmpty(words)) { Unit(p); Label(p, 48, fy + 4, 864, 40, words, 15, t.Text, false, t.BodyFont, 2, 3, t.Accent).Name = "Text"; }
+                if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
+                Move(p);
+                Renumber = true;
+                return "slide " + index + " added (image, theme " + t.Name + ")" + SmallNote();
+            }
             Photo(p, 0, 0, 960, 540, image);
             Veil(p, 0, 230, 960, 310, "#000000", 2, 0, 0.82);
             dynamic head = Label(p, 56, 392, 848, 48, op.Str("title", ""), 30, "#FFFFFF", true, t.TitleFont, 1, 4, null);
@@ -4001,10 +4346,33 @@ static class Program
             if (image != null && kind != "chart")
             {
                 Unit(p);
-                bool figure = IsFigure(image);
-                dynamic photo = figure ? Figure(p, 560, top, 352, bottom - top, image) : Photo(p, 632, top, 280, bottom - top, image);
-                p.Motion.Add(photo);
-                width = figure ? 490 : 560;
+                bool figure = IsFigure(image), list = kind == "bullets" || kind == "agenda";
+                double aspect = Aspect(image), body = bottom - top;
+                if (figure && list && aspect >= 1.9)
+                {
+                    // A wide drawing would be a thin strip beside the text: it goes across the slide, the points in a row under it.
+                    IList listed = Items(op, "points", "items", "bullets");
+                    bool headed = false;
+                    foreach (object raw in listed) if (Field(raw, "head") != null) headed = true;
+                    double under = (listed.Count == 0 ? 0 : headed ? 104 : 66) + (string.IsNullOrEmpty(op.Str("callout", null)) ? 0 : 54);
+                    double fh = Math.Min(864 / aspect + 20, body - under - 12);
+                    // What is left over goes above and below, so the slide does not end in an empty band.
+                    double spare = Math.Max(0, body - under - 14 - fh);
+                    top += Math.Min(spare * 0.3, 30);
+                    p.Motion.Add(Figure(p, left, top, 864, fh, image));
+                    top += fh + 14 + Math.Min(spare * 0.2, 20);
+                }
+                else if (figure)
+                {
+                    double fw = list ? Math.Max(352, Math.Min(480, body * (aspect > 0 ? aspect : 1) + 20)) : 352;
+                    p.Motion.Add(Figure(p, 912 - fw, top, fw, body, image));
+                    width = 864 - fw - 22;
+                }
+                else
+                {
+                    p.Motion.Add(Photo(p, 612, top, 300, body, image));
+                    width = 540;
+                }
             }
             if (kind == "bullets" || kind == "agenda") Bullets(p, op, left, top, width, bottom - top, kind == "agenda");
             else if (kind == "cards") Cards(p, op, left, top, width, bottom - top);
@@ -4020,7 +4388,7 @@ static class Program
         if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
         Move(p);
         Renumber = true;
-        return "slide " + index + " added (" + kind + ", theme " + t.Name + ")";
+        return "slide " + index + " added (" + kind + ", theme " + t.Name + ")" + SmallNote();
     }
 
     /// The slide comes in with the deck's transition, and its parts follow one another in.
@@ -4094,6 +4462,35 @@ static class Program
         bool foot = !string.IsNullOrEmpty(op.Str("callout", null));
         double row = Math.Min(heads ? 108 : 78, (h - (foot ? 54 : 0)) / perColumn), colWidth = columns ? (w - 32) / 2 : w;
         double start = Settle(y, h - (foot ? 54 : 0), row * perColumn);
+        if (!numbered && n <= 5 && (h - (foot ? 54 : 0)) / n < (heads ? 66 : 40))
+        {
+            // Too low for a column of points (a wide picture stands above): they go side by side.
+            double gap = 22, cw = (w - gap * (n - 1)) / n, tall = h - (foot ? 54 : 0);
+            for (int i = 0; i < n; i++)
+            {
+                Unit(p);
+                object raw = points[i];
+                string head = Field(raw, "head"), text = Field(raw, "text") ?? "";
+                double cx = x + i * (cw + gap);
+                Block(p, cx, y + 2, 28, 3, Pick(p, i), false);
+                if (head != null)
+                {
+                    // One box for both, so that a head that takes two lines pushes its text down.
+                    dynamic both = Words(p, cx, y + 10, cw, tall - 12, head + "\r" + text, 12, t.Muted, false);
+                    try
+                    {
+                        dynamic first = both.TextFrame.TextRange.Paragraphs(1);
+                        first.Font.Size = (float)(17 * p.S); first.Font.Bold = -1; first.Font.Color.RGB = Bgr(t.Text);
+                        first.ParagraphFormat.SpaceAfter = 4;
+                    }
+                    catch (Exception) { }
+                    p.Motion.Add(both);
+                }
+                else p.Motion.Add(Words(p, cx, y + 10, cw, tall - 12, text, 13, t.Text, false));
+            }
+            Callout(p, op, x, y + h - 46, w);
+            return;
+        }
         for (int i = 0; i < n; i++)
         {
             Unit(p);
@@ -4211,6 +4608,23 @@ static class Program
         Callout(p, op, x, y + h - 42, w);
     }
 
+    /// How high a formula stands, in lines of its own type size.
+    static double Tall(string tex)
+    {
+        System.Text.RegularExpressions.RegexOptions none = System.Text.RegularExpressions.RegexOptions.None;
+        double lines = 1.5;
+        if (System.Text.RegularExpressions.Regex.IsMatch(tex, @"\\(lim|max|min|sup|inf|arg\s*max|arg\s*min|argmax|argmin|operatorname\*?\{[^}]*\})\s*(\\limits)?\s*_", none)) lines = Math.Max(lines, 2.2);
+        if (System.Text.RegularExpressions.Regex.IsMatch(tex, @"\\(d|t|c)?frac|\\binom|\\over\b", none)) lines = Math.Max(lines, 2.5);
+        if (System.Text.RegularExpressions.Regex.IsMatch(tex, @"\\(sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes|int|iint|iiint|oint)\s*(\\limits)?\s*[_^]", none)) lines = Math.Max(lines, 3.1);
+        if (System.Text.RegularExpressions.Regex.IsMatch(tex, @"\\(under|over)brace", none)) lines += 1.2;
+        if (tex.Contains("\\begin{"))
+        {
+            int rows = System.Text.RegularExpressions.Regex.Matches(tex, @"\\\\").Count + 1;
+            lines = Math.Max(lines, 1.5 * rows + 0.6);
+        }
+        return lines;
+    }
+
     static void Formulas(Page p, Bag op, double x, double y, double w, double h)
     {
         Theme t = p.T;
@@ -4219,7 +4633,22 @@ static class Program
         int n = Math.Max(1, Math.Min(formulas.Count, 3));
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
         double textHeight = Math.Min(points.Count, 4) * 36 + (callout ? 54 : 0) + 8;
-        double each = Math.Min(n == 1 ? 150 : n == 2 ? 104 : 84, (h - textHeight - 8 * n) / n);
+        // Each card is as high as its formula stands: a sum with limits or a fraction needs more than a plain line.
+        double size = n == 1 ? 26 : 22, room = h - textHeight - 8 * (n - 1) - 6, sum;
+        double[] need = new double[n];
+        while (true)
+        {
+            sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                string tex = Field(formulas[i], "latex") ?? Field(formulas[i], "text") ?? "";
+                need[i] = (Field(formulas[i], "label") != null ? 20 : 0) + Tall(tex) * size + 12;
+                sum += need[i];
+            }
+            if (sum <= room || size <= 14) break;
+            size -= 1;
+        }
+        double spare = Math.Max(0, Math.Min((room - sum) / n, n == 1 ? 40 : 14));
         double cy = y;
         for (int i = 0; i < n; i++)
         {
@@ -4228,11 +4657,12 @@ static class Program
             object raw = formulas[i];
             string latex = Field(raw, "latex") ?? Field(raw, "text") ?? "", label = Field(raw, "label");
             string tone = Pick(p, i);
+            double each = need[i] + spare;
             dynamic back = Block(p, x, cy, w, each, t.Surface, false);
             Block(p, x, cy, 4, each, tone, false);
             if (label != null) Label(p, x + 18, cy + 8, w - 36, 16, label, 11, t.Muted, false, t.BodyFont, 1, 1, null);
             string source = latex.Trim().Trim('$');
-            dynamic formula = Label(p, x + 18, cy + (label != null ? 20 : 0), w - 36, each - (label != null ? 20 : 0), '$' + source + '$', n == 1 ? 26 : 22, t.Text, false, "Cambria Math", 2, 3, null);
+            dynamic formula = Label(p, x + 18, cy + (label != null ? 20 : 0), w - 36, each - (label != null ? 20 : 0), '$' + source + '$', size, t.Text, false, "Cambria Math", 2, 3, null);
             formula.Name = "Formula " + (i + 1);
             p.Motion.Add(formula);
             cy += each + 8;
@@ -4602,6 +5032,7 @@ static class Program
         if (!Card.FollowChosen) Following = a.Flag("follow", false);
         if (!Card.TypingChosen) Typing = a.Flag("typing", false);
         bool card = a.Flag("card", false);
+        CardOn = card;
         Remember(doc);
         if (card && !cardStarted) { cardStarted = true; Card.Start(); }
         string docName = (string)doc.Name;
@@ -4640,6 +5071,7 @@ static class Program
         {
             if (kind == "ppt")
             {
+                Advised = false; SmallOnSlide = false; Small.Clear();
                 if (Renumber) Numbers(doc);
                 try { MathDone(); } catch (Exception) { }
                 if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
@@ -4647,6 +5079,7 @@ static class Program
             }
             if (kind == "word")
             {
+                Advised = false; SmallOnSlide = false; Small.Clear();
                 try { FinishMath(doc); } catch (Exception) { }
                 try { MathDone(); } catch (Exception) { }
             }
@@ -4663,7 +5096,7 @@ static class Program
             }
             if (undo != null) { try { undo.EndCustomRecord(); } catch (COMException) { } }
         }
-        if (card) Card.Hold = false;
+        if (card) { Card.Hold = false; Card.Report("AI 已编辑 " + docName, Linger); }
         result["done"] = done;
         result["total"] = ops.Count;
         return result;
@@ -4703,7 +5136,7 @@ static class Program
     /// Several pages or slides side by side in one picture, each with its number: the whole document at a glance.
     static object Sheet(string kind, dynamic doc, Bag a)
     {
-        string path = a.Need("out");
+        string path = Path.GetFullPath(a.Need("out"));
         int cell = Math.Max(300, Math.Min(1000, a.Int("width", 640)));
         dynamic pages = kind == "word" ? doc.Windows[1].Panes[1].Pages : null;
         int total = kind == "word" ? (int)pages.Count : (int)doc.Slides.Count;
@@ -4762,7 +5195,7 @@ static class Program
     static object Render(string kind, dynamic app, dynamic doc, Bag a)
     {
         if (a.Flag("sheet", false) && kind != "excel") return Sheet(kind, doc, a);
-        string path = a.Need("out");
+        string path = Path.GetFullPath(a.Need("out"));
         int width = Math.Max(320, Math.Min(2400, a.Int("width", 1100)));
         Dictionary<string, object> result = new Dictionary<string, object>();
         if (kind == "ppt")
