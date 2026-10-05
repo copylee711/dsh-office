@@ -4937,14 +4937,208 @@ static class Program
     }
 
     /// $...$ in the text of a shape become native equations, in place.
+    // WPS Presentation takes no equations: not built, not pasted. There a formula is set by WPS Writer, in a document
+    // nobody sees, in the size and colour of the text it belongs to, and comes onto the slide as a vector picture.
+    // In the text its place is kept by a run of blanks as wide as the picture — and as tall, so that the line makes
+    // room — and once the batch is done and everything stands where it will stand, each picture is laid over its blanks.
+
+    static dynamic PicWord, PicDoc;
+    /// One per formula waiting to be laid over its blanks: the text range, which run of blanks in it, the picture file,
+    /// how much of the picture's left is empty, and the formula's width and height in points.
+    static readonly List<object[]> SlidePictures = new List<object[]>();
+    const char Blank = '\u2007';
+    /// How far down, in type sizes, a formula picture goes from the middle of its line to sit on the text's baseline.
+    const double Lower = 0.3;
+
+    static bool PicSource()
+    {
+        if (PicDoc != null) return true;
+        try
+        {
+            Type type = Type.GetTypeFromProgID("KWPS.Application");
+            if (type == null) return false;
+            PicWord = Activator.CreateInstance(type);
+            try { PicWord.Visible = false; } catch (Exception) { }
+            try { PicWord.DisplayAlerts = 0; } catch (Exception) { }
+            PicDoc = PicWord.Documents.Add();
+            try { NoteOwn(Convert.ToInt64(PicDoc.ActiveWindow.Hwnd)); } catch (Exception) { }
+            // No line grid: the line is then as tall as the formula, and so is the picture.
+            try { PicDoc.PageSetup.LayoutMode = 0; } catch (Exception) { }
+            return true;
+        }
+        catch (Exception error) { Trace("no WPS Writer for the formula pictures: " + error.Message.Trim()); PicDoc = null; PicWord = null; return false; }
+    }
+
+    static void PicDone()
+    {
+        SlidePictures.Clear();
+        if (PicWord == null) return;
+        try { if (PicDoc != null) PicDoc.Close(0); } catch (Exception) { }
+        try { if ((int)PicWord.Documents.Count == 0) PicWord.Quit(); } catch (Exception) { }
+        PicDoc = null; PicWord = null;
+    }
+
+    /// The pictures of the formulas a text shape carried before: gone when its text is written anew.
+    static void DropPictures(dynamic textRange)
+    {
+        try
+        {
+            dynamic shape = textRange.Parent.Parent, slide = shape.Parent;
+            string mark = "Formula of " + (string)shape.Name + " ";
+            List<object> old = new List<object>();
+            foreach (dynamic other in slide.Shapes) { if (((string)other.Name).StartsWith(mark, StringComparison.Ordinal)) old.Add(other); }
+            foreach (dynamic other in old) other.Delete();
+        }
+        catch (Exception) { }
+    }
+
+    static int WppMath(dynamic textRange, System.Text.RegularExpressions.MatchCollection found)
+    {
+        if (Omml == null || !PicSource()) { SlideMathSkipped += found.Count; return 0; }
+        List<object[]> mine = new List<object[]>();
+        for (int k = found.Count - 1; k >= 0; k--)
+        {
+            System.Text.RegularExpressions.Match m = found[k];
+            bool display = m.Groups[1].Success;
+            string source = (display ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+            System.Text.RegularExpressions.Match tagged = Tag.Match(source);
+            if (tagged.Success) source = source.Remove(tagged.Index, tagged.Length).Trim();
+            try
+            {
+                object made;
+                // A formula given in a field of its own (a formula card) comes set for a line of its own.
+                if (!Omml.TryGetValue((display ? "d:" : "i:") + source, out made) || !(made is string))
+                {
+                    if (!Omml.TryGetValue((display ? "i:" : "d:") + source, out made) || !(made is string)) { SlideMathSkipped++; continue; }
+                    display = !display;
+                }
+                dynamic spot = textRange.Characters(m.Index + 1, m.Length);
+                int ink = 0; float size = 18;
+                try { ink = (int)spot.Font.Color.RGB; size = (float)spot.Font.Size; } catch (Exception) { }
+                if (size < 4 || size > 400) size = 18;
+                PicDoc.Content.Delete();
+                // Something before it on the line keeps a formula that belongs inside a sentence in its smaller, inline set.
+                PicDoc.Content.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"left\"/></m:oMathParaPr>" + (string)made + "</m:oMathPara>" : "<w:r><w:t>\u200B</w:t></w:r>" + (string)made));
+                if ((int)PicDoc.OMaths.Count == 0) { SlideMathSkipped++; continue; }
+                dynamic math = PicDoc.OMaths[1].Range;
+                math.Font.Size = size;
+                math.Font.Color = ink;
+                dynamic format = PicDoc.Paragraphs[1].Format;
+                format.Alignment = 0; format.FirstLineIndent = 0; format.CharacterUnitFirstLineIndent = 0; format.SpaceBefore = 0; format.SpaceAfter = 0;
+                try { format.LineSpacingRule = 0; format.DisableLineHeightGrid = -1; } catch (Exception) { }
+                math = PicDoc.OMaths[1].Range;
+                int from = (int)math.Start, to = (int)math.End;
+                double left = Convert.ToDouble(PicDoc.Range(from, from).Information[5]), right = Convert.ToDouble(PicDoc.Range(to, to).Information[5]);
+                double margin = Convert.ToDouble(PicDoc.PageSetup.LeftMargin), width = right - left, up = 1;
+                // The picture shows the first 415 points of the line. A formula longer than that is set smaller, to
+                // fit, and its picture — lines and curves, not dots — is brought back to size on the slide.
+                double used = size;
+                for (int attempt = 0; attempt < 6; attempt++)
+                {
+                    // Gone on to a second line: its end is then lower than its start.
+                    bool wrapped = Math.Abs(Convert.ToDouble(PicDoc.Range(to, to).Information[6]) - Convert.ToDouble(PicDoc.Range(from, from).Information[6])) > 1;
+                    if (!wrapped && right - margin <= 400) break;
+                    used = Math.Max(3, wrapped ? used * 0.62 : used * 385 / (right - margin));
+                    math.Font.Size = (float)used;
+                    math = PicDoc.OMaths[1].Range;
+                    from = (int)math.Start; to = (int)math.End;
+                    left = Convert.ToDouble(PicDoc.Range(from, from).Information[5]); right = Convert.ToDouble(PicDoc.Range(to, to).Information[5]);
+                    width = right - left;
+                    up = size / used;
+                }
+                byte[] bits = (byte[])PicDoc.Paragraphs[1].Range.EnhMetaFileBits;
+                if (bits == null || bits.Length < 88 || width < 1) { SlideMathSkipped++; continue; }
+                // The frame of the picture, in hundredths of a millimetre.
+                double height = (BitConverter.ToInt32(bits, 36) - BitConverter.ToInt32(bits, 28)) / 2540.0 * 72.0;
+                // From here on the two are what the formula measures on the slide.
+                double cut = width;
+                width *= up; height *= up;
+                string file = Path.Combine(Path.GetTempPath(), "dsh-office-formula-" + Guid.NewGuid().ToString("N") + ".emf");
+                File.WriteAllBytes(file, bits);
+                double frame = (BitConverter.ToInt32(bits, 32) - BitConverter.ToInt32(bits, 24)) / 2540.0 * 72.0;
+                // The blanks: tall enough for the line to make room, and as many as are as wide as the formula.
+                // A plain one-line formula comes about 1.75 times its type size tall (the line of the math font): only what
+                // is taller than that — a fraction, a sum with its limits — needs a taller line.
+                float tall = (float)Math.Min(height / 1.75, 200);
+                if (tall < size * 1.12f) tall = size;
+                int count = Math.Max(1, (int)Math.Ceiling(width / (0.556 * tall)));
+                spot.Text = new string(Blank, count);
+                dynamic blanks = textRange.Characters(m.Index + 1, count);
+                if (tall > size + 0.5f) blanks.Font.Size = tall;
+                try
+                {
+                    double got = Convert.ToDouble(blanks.BoundWidth);
+                    int better = got > 1 ? Math.Max(1, (int)Math.Ceiling(width / (got / count))) : count;
+                    if (better != count && better < 400)
+                    {
+                        blanks.Text = new string(Blank, better);
+                        count = better;
+                        if (tall > size + 0.5f) textRange.Characters(m.Index + 1, count).Font.Size = tall;
+                    }
+                }
+                catch (Exception) { }
+                mine.Insert(0, new object[] { textRange, 0, file, left - margin, width, height, frame, (double)size, cut });
+                Trace("formula " + k + " \"" + source + "\" as a picture " + Math.Round(width) + "x" + Math.Round(height) + ", " + count + " blank(s); from " + Math.Round(left) + " to " + Math.Round(right) + ", margin " + Math.Round(margin) + ", frame " + Math.Round(frame) + (display ? ", display" : ""));
+            }
+            catch (Exception error) { SlideMathSkipped++; Trace("formula " + k + " failed: " + error.GetType().Name + " " + error.Message); }
+        }
+        for (int i = 0; i < mine.Count; i++) { mine[i][1] = i; SlidePictures.Add(mine[i]); }
+        return mine.Count;
+    }
+
+    /// End of a batch on a WPS deck: every formula picture goes over the blanks kept for it.
+    static void PlacePictures()
+    {
+        foreach (object[] one in SlidePictures)
+        {
+            string file = (string)one[2];
+            try
+            {
+                dynamic range = one[0];
+                int ordinal = (int)one[1];
+                double empty = (double)one[3], width = (double)one[4], height = (double)one[5], frame = (double)one[6], size = (double)one[7], cut = (double)one[8];
+                string text = (string)range.Text ?? "";
+                int at = -1, length = 0, seen = -1;
+                for (int i = 0; i < text.Length; i++)
+                {
+                    if (text[i] != Blank) continue;
+                    int end = i;
+                    while (end < text.Length && text[end] == Blank) end++;
+                    if (++seen == ordinal) { at = i; length = end - i; break; }
+                    i = end;
+                }
+                if (at < 0) { SlideMathSkipped++; continue; }
+                dynamic blanks = range.Characters(at + 1, length);
+                double x = Convert.ToDouble(blanks.BoundLeft), y = Convert.ToDouble(blanks.BoundTop), w = Convert.ToDouble(blanks.BoundWidth), h = Convert.ToDouble(blanks.BoundHeight);
+                dynamic shape = range.Parent.Parent, slide = shape.Parent;
+                dynamic picture = slide.Shapes.AddPicture(file, 0, -1, 0, 0);
+// A picture wider than the slide comes in scaled down: what is cut off is counted in what it now measures.
+                double whole = Convert.ToDouble(picture.Width), scale = frame > 1 ? whole / frame : 1;
+                picture.PictureFormat.CropLeft = (float)Math.Max(0, empty * scale);
+                picture.PictureFormat.CropRight = (float)Math.Max(0, (frame - empty - cut) * scale);
+                try { picture.LockAspectRatio = 0; } catch (Exception) { }
+                picture.Width = (float)width;
+                picture.Height = (float)height;
+                picture.Left = (float)(x + (w - width) / 2);
+                // The line of the math font keeps more room under the letters than over them.
+                picture.Top = (float)(y + (h - height) / 2 + (height < 2 * size ? Lower + 0.1 : Lower) * size);
+                try { picture.Name = "Formula of " + (string)shape.Name + " " + (ordinal + 1); } catch (Exception) { }
+            }
+            catch (Exception error) { SlideMathSkipped++; Trace("placing a formula picture: " + error.GetType().Name + " " + error.Message); }
+            finally { try { File.Delete(file); } catch (Exception) { } }
+        }
+        SlidePictures.Clear();
+    }
+
     static int PptMath(dynamic textRange)
     {
         string text = (string)textRange.Text;
+        if (Suite == "wps") DropPictures(textRange);
         if (text == null || text.IndexOf('$') < 0) return 0;
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
         Trace("text of " + text.Length + " chars with " + found.Count + " formula(s): " + Clip(text, 60));
-        if (Suite == "wps") { SlideMathSkipped += found.Count; return 0; }
+        if (Suite == "wps") return WppMath(textRange, found);
         if (!MathSource()) { PptMathFailed += found.Count; return 0; }
         SaveClipboard();
         int made = 0;
@@ -7772,10 +7966,12 @@ static class Program
             {
                 Advised = false; SmallOnSlide = false; Small.Clear(); Cut.Clear(); Focus = null;
                 if (Renumber) Numbers(doc);
+                if (SlidePictures.Count > 0) { try { PlacePictures(); } catch (Exception) { } }
+                try { PicDone(); } catch (Exception) { }
                 try { MathDone(); } catch (Exception) { }
                 if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
                 PptMathFailed = 0;
-                if (SlideMathSkipped > 0) done.Add("(NOTE " + SlideMathSkipped + " formula(s) were left as text between dollar signs: WPS Presentation takes no equations from here yet. Write short ones in plain characters instead (x², α ≤ β, Σ), and tell the user that formulas on slides need PowerPoint)");
+                if (SlideMathSkipped > 0) done.Add("(NOTE " + SlideMathSkipped + " formula(s) could not be set for WPS Presentation and were left as text between dollar signs: rewrite them in plainer LaTeX or in plain characters (x², α ≤ β))");
                 SlideMathSkipped = 0;
             }
             if (kind == "word")

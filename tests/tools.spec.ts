@@ -38,8 +38,8 @@ describe('the office suite', () => {
   it('names the WPS apps and says what is missing there', () => {
     const doc = { app: 'word' as const, suite: 'wps', name: 'a.docx', path: 'C:\\a.docx', saved: true, active: true, how: 'opened' as const }
     expect(formatOpened(doc)).toContain('WPS Writer')
-    expect(formatOpened(doc)).not.toContain('formulas')
-    expect(formatOpened({ ...doc, app: 'ppt' })).toContain('formulas')
+    expect(formatOpened(doc)).not.toContain('picture')
+    expect(formatOpened({ ...doc, app: 'ppt' })).toContain('picture')
     expect(formatOpened({ ...doc, suite: undefined })).not.toContain('WPS')
     const status = formatStatus([
       { app: 'word', suite: 'office', installed: false, running: false, documents: [] },
@@ -73,6 +73,8 @@ describe('formulas for WPS', () => {
     expect(latexToOmml('\\frac{a}{', false)).toBeUndefined()
     const found = formulasOf([{ op: 'insert_paragraphs', items: ['inline $x^2$ and $x^2$ again', { text: '$$E = mc^2 \\tag{1}$$' }, 'no formula, price $5'] }])
     expect(Object.keys(found).sort()).toEqual(['d:E = mc^2', 'i:x^2'])
+    // A formula card gives its formula in a field of its own, without dollar signs.
+    expect(Object.keys(formulasOf([{ op: 'slide', kind: 'formula', formulas: [{ latex: '\\frac{a}{b}', label: 'x' }, { latex: '$y^2$' }] }])).sort()).toEqual(['d:\\frac{a}{b}', 'd:y^2'])
   })
 })
 
