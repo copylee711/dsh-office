@@ -8,6 +8,8 @@
 export const ENTRY_ID = 'copylee-office'
 
 export interface Settings {
+  /** Work in the background: no window, no card, text written at once; what was opened is saved and closed when the agent stops. */
+  silent: boolean
   /** Scroll the window to where the agent is working; off = silent, the user's view is left alone. */
   follow: boolean
   /** Write text a few characters at a time, the way a person types. */
@@ -25,6 +27,7 @@ export interface Settings {
 }
 
 export const DEFAULTS: Settings = {
+  silent: false,
   follow: true,
   typing: true,
   card: true,
@@ -46,6 +49,7 @@ export function resolveConfig(raw: unknown): Settings {
   }
   const width = out.renderWidth
   return {
+    silent: typeof out.silent === 'boolean' ? out.silent : DEFAULTS.silent,
     follow: typeof out.follow === 'boolean' ? out.follow : DEFAULTS.follow,
     typing: typeof out.typing === 'boolean' ? out.typing : DEFAULTS.typing,
     card: typeof out.card === 'boolean' ? out.card : DEFAULTS.card,

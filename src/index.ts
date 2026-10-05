@@ -26,6 +26,7 @@ export const inject = ['tools', 'attachments']
 export const STATUS_ROUTE = '/api/dsh-office/status'
 
 export interface Config {
+  silent?: boolean
   follow?: boolean
   typing?: boolean
   card?: boolean
@@ -39,6 +40,10 @@ export const Config: z<Config> = z.object({
   follow: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '跟随 AI 正在修改的位置（自动滚动到那里）；关闭为静默执行，不动你的视图' },
     'en-US': { $description: 'Scroll to where the AI is editing; off = silent, your view is left alone' },
+  }),
+  silent: z.boolean().default(false).volatile().i18n({
+    'zh-CN': { $description: '静默模式：在后台完成，不弹出任何窗口和迷你卡片，一次写入（不逐字）；回合结束时自动保存并关闭后台打开的文档。开启后下面的“跟随”“逐字”“迷你卡片”不再起作用' },
+    'en-US': { $description: 'Silent mode: work in the background with no window and no card, text written at once; what was opened is saved and closed when the turn ends. Follow, typing and the card do not apply while it is on' },
   }),
   typing: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '文字像打字一样逐步写出，而不是整块出现（每段约多花 0.3 秒）' },
@@ -133,6 +138,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!carded || typeof agent !== 'object' || agent === null || !working.has(agent)) return
     working.delete(agent)
     void helper.call('card', { text: 'AI 已完成', hold: false }, 5_000).catch(() => {})
+    // What was opened in the background (silent mode) is saved and closed now: no window shows it, so nobody else would.
+    void helper.call<string[]>('settle', {}, 60_000).then(said => { for (const line of said) ctx.logger.info(`office: ${line}`) }).catch(() => {})
   }
   ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') retire(agent) })
   ctx.on('agent/disposed', ({ agent }) => { retire(agent) })

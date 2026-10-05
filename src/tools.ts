@@ -90,6 +90,11 @@ const fileName = (doc: string | undefined): string => (doc ?? '').split(/[\\/]/)
 const DOC = { type: 'string', description: 'The open document: its full path or its window name (e.g. report.docx). Default: the document you last opened or worked on.' } as const
 const APP = { type: 'string', enum: ['word', 'excel', 'ppt'], description: 'Only to pick the active document of another app, or when doc has no extension.' } as const
 
+const SILENT = `Silent mode is on (the user chose it in the settings): the document is open in the background, with no window, and the user is not watching. Work as usual — office_edit, office_render to look at the result, office_save — only unseen. When you stop, what was opened in the background is saved and closed by itself; say in your answer where the file is.
+- Excel data work may use Python here when that is quicker (pandas / openpyxl for cleaning, joining and aggregating large tables): run it on the file on disk while the workbook is NOT open in Excel (before office_open, or after office_close), or compute in Python and put the results in with write_range. Charts, number formats, conditional formats and layout still go through office_edit, which lets Excel itself draw them. Word and PowerPoint documents are always built with office_edit: file libraries lose their layout.
+- Look at the result with office_render before you finish, exactly as otherwise: nobody else sees it until it is done.
+- If something can only be done on the window itself with mouse / keyboard tools, call office_open {path, show: true} first: it brings the document into view. That is slow; use it only when office_edit has no operation for the job.`
+
 const TAIL = `Colours are "#RRGGBB"; align is left | center | right | justify; file paths are absolute.`
 
 const EDIT_CORE = `Edit a document that is open in Word, Excel or PowerPoint, live: each change appears in the window, and the user can keep working in it. Runs ops in order and stops at the first that fails. Does not save (use office_save). Word edits are one undo step for the user; Excel and PowerPoint edits cannot be undone with Ctrl+Z.
@@ -277,6 +282,15 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     return current
   }
 
+  // What silent mode means for the model, said once per conversation with the first document opened that way.
+  const quietTold = new Set<string>()
+  const quietNote = (exec: unknown): string => {
+    const session = sessionOf(exec)
+    if (quietTold.has(session)) return ''
+    quietTold.add(session)
+    return '\n\n' + SILENT
+  }
+
   tools.push(defineTool({
     name: 'office_open',
     description: 'Open a .docx / .xlsx / .pptx file in Word, Excel or PowerPoint so the user watches the work and can edit alongside; a path that does not exist yet creates the file. If the file is already open it is used as it is. Call this before the other office_ tools.',
@@ -284,11 +298,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       path: { type: 'string', description: 'Absolute path of the file. Omit to start an unsaved new document (then app is required).' },
       template: { type: 'string', description: 'Absolute path of a template or an example to start from: it is copied to path (which must not exist yet) and the copy is opened, the original left untouched. Use it when the user gives a template or a sample whose look the new document should have.' },
       app: { type: 'string', enum: ['word', 'excel', 'ppt'], description: 'Needed only without path.' },
+      show: { type: 'boolean', description: 'true brings the document\'s window into view even in silent mode. Needed only before working on the window itself with mouse / keyboard tools.' },
     },
     output,
     timeoutMs: 90_000,
     async execute(args, exec): Promise<Value> {
-      const { path, app, template } = args as { path?: string; app?: string; template?: string }
+      const { path, app, template, show } = args as { path?: string; app?: string; template?: string; show?: boolean }
       if (path !== undefined && !isAbsolute(path)) throw new Error('path must be an absolute path.')
       if (template !== undefined) {
         if (path === undefined) throw new Error('With template, give path: where the copy is to be saved.')
@@ -298,11 +313,15 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         await copyFile(template, path).catch(error => { throw new Error(`Could not copy the template: ${error instanceof Error ? error.message : String(error)}`) })
       }
       const kind = appOf({ ...(app === undefined ? {} : { app }), ...(path === undefined ? {} : { path }) })
-      const { showOnOpen, follow, typing, card } = host.settings()
-      const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: showOnOpen, follow, typing, card }, 80_000)
+      const { showOnOpen, follow, typing, card, silent } = host.settings()
+      // Silent mode: the document is opened where no one sees it, unless the model asks for the window.
+      const quiet = silent && show !== true
+      const doc = await helper.call<DocInfo>('open', quiet
+        ? { app: kind, ...(path === undefined ? {} : { path }), silent: true, show: false }
+        : { app: kind, ...(path === undefined ? {} : { path }), show: show === true ? true : showOnOpen, follow, typing, card: silent ? false : card }, 80_000)
       current = { app: kind, doc: doc.path ?? doc.name }
       if (doc.how !== 'attached') own.add(keyOf(current))
-      return { text: formatOpened(doc) + guide(exec, kind) }
+      return { text: formatOpened(doc) + (quiet ? quietNote(exec) : '') + guide(exec, kind) }
     },
     presentCall: args => card(`打开 ${fileName((args as { path?: string }).path) || '新文档'}`),
   }))
@@ -364,9 +383,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const input = args as unknown as Target & { ops: unknown }
       if (!Array.isArray(input.ops) || input.ops.length === 0) throw new Error('ops must be a non-empty array.')
       if (input.ops.length > 200) throw new Error('At most 200 operations per call.')
-      const { follow, typing, card } = host.settings()
+      const { follow, typing, card, silent } = host.settings()
       const on = target(input)
-      const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card }, 4.5 * 60_000)
+      const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card: silent ? false : card, silent }, 4.5 * 60_000)
       if (result.done.length > 0) unseen.add(keyOf(on))
       // A conversation that edits without having opened or read (the document was open already) gets the list here.
       return { text: formatEdit(result) + guide(exec, on.app) }

@@ -7,7 +7,7 @@ export type AppKind = 'word' | 'excel' | 'ppt'
 
 export const APP_NAMES: Record<AppKind, string> = { word: 'Word', excel: 'Excel', ppt: 'PowerPoint' }
 
-export interface DocInfo { app: AppKind; name: string; path: string | null; saved: boolean; active: boolean; readOnly?: boolean; how?: 'attached' | 'opened' | 'created' }
+export interface DocInfo { app: AppKind; name: string; path: string | null; saved: boolean; active: boolean; readOnly?: boolean; how?: 'attached' | 'opened' | 'created'; background?: boolean }
 export interface AppStatus { app: AppKind; installed: boolean; running: boolean; version?: string; error?: string; documents: DocInfo[] }
 
 export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string; open?: boolean; inTable?: boolean }
@@ -16,14 +16,14 @@ export interface ExcelRead { sheets: Array<{ name: string; used: string; charts?
 export interface PptRead { slides: number; width: number; height: number; items: Array<{ slide: number; layout?: string; plain?: number; shapes: Array<{ name: string; id?: number; type: string; box: number[]; text?: string }> }> }
 export interface EditResult { done: string[]; total: number; failed?: { index: number; op: string; error: string; code: string } }
 
-const state = (doc: DocInfo): string => [doc.saved ? 'saved' : 'unsaved changes', doc.readOnly ? 'read-only' : '', doc.active ? 'active' : ''].filter(Boolean).join(', ')
+const state = (doc: DocInfo): string => [doc.saved ? 'saved' : 'unsaved changes', doc.readOnly ? 'read-only' : '', doc.active ? 'active' : '', doc.background ? 'in the background, no window' : ''].filter(Boolean).join(', ')
 
 export function formatStatus(apps: AppStatus[]): string {
   const lines: string[] = []
   for (const app of apps) {
     const name = APP_NAMES[app.app]
     if (!app.installed) { lines.push(`${name}: not installed`); continue }
-    if (!app.running) { lines.push(`${name}: installed, not running (office_open starts it)`); continue }
+    if (!app.running && app.documents.length === 0) { lines.push(`${name}: installed, not running (office_open starts it)`); continue }
     if (app.error) { lines.push(`${name}: ${app.error}`); continue }
     if (app.documents.length === 0) { lines.push(`${name}: running, nothing open`); continue }
     lines.push(`${name}:`)
