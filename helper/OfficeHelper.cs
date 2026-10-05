@@ -4872,6 +4872,8 @@ static class Program
         public bool Dark;
         public string Transition = "fade";
         public bool Animate = true;
+        /// How the section slides of the deck look: solid, side, band or number.
+        public string Section = "";
         /// A slide of the deck every designed slide is drawn on (a template's background page), 0 = a blank slide.
         public int Base;
         /// The part of the slide the content may use: left, top, width, height in points (empty = all of it).
@@ -4923,11 +4925,15 @@ static class Program
         if (op.Has("dark")) t.Dark = op.Flag("dark", false);
         if (op.Has("transition")) t.Transition = op.Need("transition").ToLowerInvariant();
         if (op.Has("animate")) t.Animate = op.Flag("animate", true);
+        if (op.Has("section")) t.Section = op.Need("section").ToLowerInvariant();
+        // Decks should not all open their parts the same way: unless told, one of the looks is taken by chance.
+        if (string.IsNullOrEmpty(t.Section)) t.Section = new string[] { "solid", "side", "band", "number" }[new Random().Next(4)];
+        if (t.Section != "solid" && t.Section != "side" && t.Section != "band" && t.Section != "number") throw new Fail("BAD_ARGS", "\"section\" is how section slides look: solid, side, band or number.");
         if (op.Has("base")) t.Base = op.Int("base", 0);
         if (op.Has("area")) t.Area = Box(op.List("area"));
         foreach (string colour in new string[] { t.Bg, t.Surface, t.Text, t.Muted, t.Primary, t.Accent, t.Line }) Bgr(colour);
         try { deck.Tags.Add("DSHTHEME", Json.Serialize(t)); } catch (Exception) { }
-        return "theme \"" + t.Name + "\" set: it applies to the slides made with the slide operation from here on";
+        return "theme \"" + t.Name + "\" set (section slides: " + t.Section + "): it applies to the slides made with the slide operation from here on";
     }
 
     static double[] Box(IList raw)
@@ -5322,6 +5328,13 @@ static class Program
         dynamic number = Label(p, 792, 50, 120, 16, "", 10, t.Muted, false, t.BodyFont, 3, 1, null);
         number.Name = "PageNumber";
         string title = op.Str("title", "");
+        if (title.Trim().Length == 0 && string.IsNullOrEmpty(op.Str("subtitle", null)))
+        {
+            // No headline: the content begins right under the dash, instead of under an empty band.
+            string foot = op.Str("note", null);
+            if (!string.IsNullOrEmpty(foot)) Label(p, 48, 506, 864, 14, foot, 9, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Note";
+            return 72;
+        }
         dynamic head = Label(p, 48, 70, 864, 40, title, title.Length > 26 ? 23 : 27, t.Primary, true, t.TitleFont, 1, 3, t.Accent);
         head.Name = "Title";
         double y = 114;
@@ -5455,6 +5468,57 @@ static class Program
         else if (kind == "section")
         {
             string ground = t.Dark ? t.Surface : t.Primary, ink = t.Dark ? t.Text : "#FFFFFF", soft = t.Dark ? t.Primary : "#FFFFFF";
+            string look = op.Str("style", string.IsNullOrEmpty(t.Section) ? "solid" : t.Section).ToLowerInvariant();
+            if (!p.Based && image == null && look != "solid")
+            {
+                string digits = op.Str("number", null), name = op.Str("title", ""), under = op.Str("subtitle", null);
+                string strong = t.Dark ? t.Primary : t.Primary, onGround = t.Dark ? t.Text : "#FFFFFF";
+                dynamic head2;
+                if (look == "side")
+                {
+                    // A panel at the left carries the number; the words stand on the plain ground beside it.
+                    Block(p, 0, 0, 320, 540, ground, false);
+                    if (!string.IsNullOrEmpty(digits)) Label(p, 0, 170, 320, 200, digits, 130, onGround, true, t.TitleFont, 2, 3, null).Name = "Number";
+                    Block(p, 384, 214, 56, 4, t.Accent, false);
+                    Unit(p);
+                    head2 = Label(p, 384, 232, 520, 64, name, name.Length > 12 ? 32 : 40, strong, true, t.TitleFont, 1, 1, null);
+                    Unit(p);
+                    if (!string.IsNullOrEmpty(under)) { dynamic sub2 = Label(p, 384, 308, 520, 80, under, 15, t.Text, false, t.BodyFont, 1, 1, t.Accent); sub2.Name = "Subtitle"; p.Motion.Add(sub2); }
+                }
+                else if (look == "band")
+                {
+                    // A band across the slide holds the title; the number stands above it, the line under it.
+                    if (!string.IsNullOrEmpty(digits)) Label(p, 56, 92, 400, 100, "PART " + digits, 20, t.Accent, true, t.TitleFont, 1, 4, null).Name = "Number";
+                    Block(p, 0, 204, 960, 132, ground, false);
+                    Block(p, 0, 204, 12, 132, t.Accent, false);
+                    Unit(p);
+                    head2 = Label(p, 56, 204, 848, 132, name, name.Length > 14 ? 34 : 42, onGround, true, t.TitleFont, 1, 3, null);
+                    Unit(p);
+                    if (!string.IsNullOrEmpty(under)) { dynamic sub2 = Label(p, 56, 356, 848, 60, under, 15.5, t.Text, false, t.BodyFont, 1, 1, t.Accent); sub2.Name = "Subtitle"; p.Motion.Add(sub2); }
+                }
+                else
+                {
+                    // The number, very large and faint, fills the right; the words stand at the left over a thin line.
+                    if (!string.IsNullOrEmpty(digits))
+                    {
+                        dynamic huge = Label(p, 470, 60, 470, 420, digits, 300, strong, true, t.TitleFont, 3, 3, null);
+                        huge.Name = "Number";
+                        try { huge.TextFrame2.TextRange.Font.Fill.Transparency = t.Dark ? 0.8f : 0.88f; } catch (Exception) { }
+                    }
+                    Block(p, 56, 226, 56, 4, t.Accent, false);
+                    Unit(p);
+                    head2 = Label(p, 56, 244, 620, 64, name, name.Length > 12 ? 34 : 42, strong, true, t.TitleFont, 1, 1, null);
+                    Rule(p, 56, 330, 520, 330, t.Line, 0.75);
+                    Unit(p);
+                    if (!string.IsNullOrEmpty(under)) { dynamic sub2 = Label(p, 56, 344, 560, 80, under, 15, t.Muted, false, t.BodyFont, 1, 1, t.Accent); sub2.Name = "Subtitle"; p.Motion.Add(sub2); }
+                }
+                head2.Name = "Title";
+                p.Motion.Add(head2);
+                if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
+                Move(p);
+                Renumber = true;
+                return "slide " + index + " added (section, theme " + t.Name + ")";
+            }
             if (p.Based) { ink = t.Primary; soft = t.Accent; }
             else p.Slide.Background.Fill.ForeColor.RGB = Bgr(ground);
             if (image != null) { Photo(p, 0, 0, 960, 540, image); Veil(p, 0, 0, 960, 540, ground, 1, 0.92, 0.55); }
@@ -5551,7 +5615,7 @@ static class Program
             double top = Head(p, op), bottom = BodyBottom, left = 48, width = 864;
             p.Current = null;
             // A picture beside the content: the right third of the body.
-            if (image != null && kind != "chart" && kind != "canvas" && kind != "custom" && kind != "gallery" && kind != "figures")
+            if (image != null && kind != "chart" && kind != "canvas" && kind != "custom" && kind != "diagram" && kind != "code" && kind != "gallery" && kind != "figures")
             {
                 Unit(p);
                 bool figure = IsFigure(image), list = kind == "bullets" || kind == "agenda";
@@ -5594,8 +5658,9 @@ static class Program
             else if (kind == "theorem" || kind == "definition" || kind == "lemma") Theorem(p, op, left, top, width, bottom - top);
             else if (kind == "gallery" || kind == "figures") Gallery(p, op, left, top, width, bottom - top);
             else if (kind == "summary" || kind == "takeaways") Summary(p, op, left, top, width, bottom - top);
-            else if (kind == "canvas" || kind == "custom") Canvas(p, op);
-            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, theorem, gallery, summary, timeline, compare, process, split, image, quote, canvas or closing.");
+            else if (kind == "canvas" || kind == "custom" || kind == "diagram") Canvas(p, op);
+            else if (kind == "code") Code(p, op, left, top, width, bottom - top);
+            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, theorem, gallery, summary, code, timeline, compare, process, split, image, quote, canvas or closing.");
         }
         if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
         Move(p);
@@ -6128,11 +6193,41 @@ static class Program
         IList items = Items(op, "items", "elements");
         if (items.Count == 0) throw new Fail("BAD_ARGS", "A canvas slide needs \"items\": [{type, box: [x, y, w, h], ..}, ..] on the 960 x 540 canvas.");
         int index = 0;
+        Dictionary<string, object> known = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         foreach (object raw in items)
         {
             index++;
             Bag it = new Bag(raw);
             string type = it.Str("type", "text").ToLowerInvariant();
+            if (type == "edge" || type == "connect" || type == "link")
+            {
+                // A connector from one named item to another: it finds the nearest sides by itself and stays attached.
+                object a, b2;
+                string from = it.Need("from"), to = it.Need("to");
+                if (!known.TryGetValue(from, out a) || !known.TryGetValue(to, out b2)) throw new Fail("BAD_ARGS", "Item " + index + " connects \"" + from + "\" to \"" + to + "\", but " + (known.ContainsKey(from) ? "\"" + to + "\"" : "\"" + from + "\"") + " is not the id of an item before it. Ids so far: " + string.Join(", ", new List<string>(known.Keys).ToArray()) + ".");
+                string way = it.Str("kind", it.Str("shape", "elbow")).ToLowerInvariant();
+                dynamic link = p.Slide.Shapes.AddConnector(way == "straight" ? 1 : way == "curve" || way == "curved" ? 3 : 2, 0, 0, 10, 10);
+                Dictionary<string, int> sides = new Dictionary<string, int> { { "top", 1 }, { "left", 2 }, { "bottom", 3 }, { "right", 4 } };
+                link.ConnectorFormat.BeginConnect((dynamic)a, 1);
+                link.ConnectorFormat.EndConnect((dynamic)b2, 1);
+                try { link.RerouteConnections(); } catch (Exception) { }
+                int side;
+                if (it.Has("fromSide") && sides.TryGetValue(it.Need("fromSide").ToLowerInvariant(), out side)) { try { link.ConnectorFormat.BeginConnect((dynamic)a, side); } catch (Exception) { } }
+                if (it.Has("toSide") && sides.TryGetValue(it.Need("toSide").ToLowerInvariant(), out side)) { try { link.ConnectorFormat.EndConnect((dynamic)b2, side); } catch (Exception) { } }
+                link.Line.ForeColor.RGB = Bgr(Tone(p, it.Str("color", null), t.Muted));
+                link.Line.Weight = (float)(it.Num("weight", 1.5) * p.S);
+                if (!it.Has("arrow") || it.On("arrow")) { try { link.Line.EndArrowheadStyle = 2; } catch (Exception) { } }
+                if (it.Flag("dashed", false)) { try { link.Line.DashStyle = 4; } catch (Exception) { } }
+                if (p.Current == null) Unit(p);
+                Track(p, link);
+                if (it.Has("label"))
+                {
+                    double mx = ((double)link.Left + (double)link.Width / 2 - p.Ox) / p.Sx, my = ((double)link.Top + (double)link.Height / 2 - p.Oy) / p.Sy;
+                    Label(p, mx - 70, my - 20, 140, 16, it.Need("label"), 10, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 4, null);
+                }
+                continue;
+            }
+            if (type == "node") type = "panel";
             double[] b = null;
             IList given = it.List("box");
             if (given != null && given.Count == 4) { b = new double[4]; for (int k = 0; k < 4; k++) b[k] = Number(given[k]); }
@@ -6160,7 +6255,7 @@ static class Program
             }
             else if (type == "panel" || type == "shape" || type == "box" || type == "circle")
             {
-                string shape = type == "circle" ? "circle" : it.Str("shape", "rect");
+                string shape = type == "circle" ? "circle" : it.Str("shape", it.Str("type", "") == "node" ? "round" : "rect");
                 string ground = Tone(p, fill ?? color, t.Surface);
                 if (shape == "circle") made = Dot(p, b[0] + b[2] / 2, b[1] + b[3] / 2, Math.Min(b[2], b[3]) / 2, ground);
                 else made = Block(p, b[0], b[1], b[2], b[3], ground, shape == "round" || shape == "rounded");
@@ -6211,9 +6306,87 @@ static class Program
             }
             else if (type == "icon") made = Icon(p, b[0], b[1], Math.Min(b[2], b[3]), it.Str("icon", it.Str("name", null)), Tone(p, color, t.Primary));
             else if (type == "bullets" || type == "points") Bullets(p, it, b[0], b[1], b[2], b[3], false);
-            else throw new Fail("BAD_ARGS", "Item " + index + " of the canvas has the unknown type \"" + type + "\": use text, title, card, panel, circle, line, arrow, image, figure, formula, stat, chart, icon or bullets.");
+            else throw new Fail("BAD_ARGS", "Item " + index + " of the canvas has the unknown type \"" + type + "\": use text, title, card, panel, node, circle, line, arrow, edge, image, figure, formula, stat, chart, icon or bullets.");
             if (made != null && it.Has("name")) { try { made.Name = it.Need("name"); } catch (Exception) { } }
+            if (made != null && it.Has("id")) known[it.Need("id")] = made;
         }
+    }
+
+    static readonly System.Text.RegularExpressions.Regex CodeParts = new System.Text.RegularExpressions.Regex(
+        "(?<comment>#.*|//.*)|(?<text>\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*')|(?<number>\\b\\d+(?:\\.\\d+)?\\b)|(?<word>\\b(?:def|class|return|if|elif|else|for|while|in|import|from|as|with|try|except|finally|raise|lambda|yield|pass|break|continue|and|or|not|is|None|True|False|self|function|const|let|var|new|async|await|public|private|static|void|int|float|double|bool|string|struct|fn|func|package|namespace|using|this|null|true|false|switch|case|do|typedef|template|typename|auto|export|default|extends|implements|interface|type|enum|match|where|select|end|then|begin)\\b)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// A listing of code: a dark panel, a fixed-width face, line numbers, comments and keywords in their own colours.
+    static void Code(Page p, Bag op, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        string code = (op.Str("code", op.Str("text", "")) ?? "").Replace("\r\n", "\n").Replace("\r", "\n").Replace("\t", "    ").TrimEnd();
+        if (code.Length == 0) throw new Fail("BAD_ARGS", "A code slide needs \"code\": the listing.");
+        string[] lines = code.Split('\n');
+        if (lines.Length > 26) throw new Fail("BAD_ARGS", "The listing has " + lines.Length + " lines; a slide holds 26 at most (and reads best with 8 to 16). Show the part that matters, or split it over two slides.");
+        IList points = Items(op, "points", "side");
+        bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        double usable = h - (callout ? 54 : 0), cw = points.Count > 0 ? w * 0.62 : w;
+        int longest = 1;
+        foreach (string line in lines) { int length = 0; foreach (char ch in line) length += ch > 255 ? 2 : 1; longest = Math.Max(longest, length); }
+        // As large as the listing allows, by its number of lines and its longest line.
+        double size = Math.Min(15, Math.Min((usable - 52) / (lines.Length * 1.38), (cw - 78) / (longest * 0.61)));
+        size = Math.Max(7.5, size);
+        double pitch = size * 1.38, ph = Math.Min(usable, lines.Length * pitch + 52);
+        string ground = t.Dark ? t.Surface : "#1E2430", ink = "#E6EAF2", dim = "#7C8798";
+        Unit(p);
+        dynamic back = Block(p, x, y, cw, ph, ground, true);
+        back.Name = "Code panel";
+        Dot(p, x + 18, y + 16, 4.5, "#FF5F57"); Dot(p, x + 34, y + 16, 4.5, "#FEBC2E"); Dot(p, x + 50, y + 16, 4.5, "#28C840");
+        string language = op.Str("language", op.Str("lang", null));
+        if (!string.IsNullOrEmpty(language)) Label(p, x + cw - 170, y + 8, 154, 16, language, 9, dim, false, "Consolas", 3, 1, null);
+        StringBuilder numbers = new StringBuilder();
+        for (int i = 0; i < lines.Length; i++) numbers.Append(i > 0 ? "\r" : "").Append(i + 1);
+        string[] faces = { "Consolas", "Consolas" };
+        for (int part = 0; part < 2; part++)
+        {
+            dynamic box = p.Slide.Shapes.AddTextbox(1, PX(p, x + (part == 0 ? 10 : 50)), PY(p, y + 34), SX(p, part == 0 ? 30 : cw - 64), SY(p, ph - 44));
+            dynamic frame = box.TextFrame;
+            frame.WordWrap = 0;
+            try { frame.AutoSize = 0; } catch (Exception) { }
+            frame.MarginLeft = 0; frame.MarginRight = 0; frame.MarginTop = 0; frame.MarginBottom = 0;
+            dynamic range = frame.TextRange;
+            range.Text = part == 0 ? numbers.ToString() : string.Join("\r", lines);
+            range.Font.Name = faces[part];
+            try { range.Font.NameFarEast = "Microsoft YaHei"; } catch (Exception) { }
+            range.Font.Size = (float)(size * p.S);
+            range.Font.Bold = 0;
+            range.Font.Color.RGB = Bgr(part == 0 ? dim : ink);
+            range.ParagraphFormat.Alignment = part == 0 ? 3 : 1;
+            try { range.ParagraphFormat.SpaceWithin = 1.15f; } catch (Exception) { }
+            box.Name = part == 0 ? "Line numbers" : "Code";
+            Track(p, box);
+            if (part == 0) continue;
+            int offset = 0;
+            foreach (string line in lines)
+            {
+                foreach (System.Text.RegularExpressions.Match m in CodeParts.Matches(line))
+                {
+                    string tone = m.Groups["comment"].Success ? "#7F8C98" : m.Groups["text"].Success ? "#E6B673" : m.Groups["number"].Success ? "#D19A66" : "#7FB4FF";
+                    try { dynamic piece = range.Characters(offset + m.Index + 1, m.Length); piece.Font.Color.RGB = Bgr(tone); if (m.Groups["comment"].Success) piece.Font.Italic = -1; }
+                    catch (Exception) { }
+                    if (m.Groups["comment"].Success) break;
+                }
+                offset += line.Length + 1;
+            }
+            p.Motion.Add(box);
+        }
+        double sx = x + cw + 28, sy = y + 4, sw = w - cw - 28;
+        for (int i = 0; i < Math.Min(points.Count, 4); i++)
+        {
+            Unit(p);
+            string head = Field(points[i], "head"), text = Field(points[i], "text") ?? "";
+            Block(p, sx, sy, 34, 3, Pick(p, i), false);
+            if (head != null) { Words(p, sx, sy + 10, sw, 22, head, 14, t.Text, true); sy += 26; }
+            p.Motion.Add(Words(p, sx, sy + 10, sw, 62, text, 12.5, head != null ? t.Muted : t.Text, false));
+            sy += head != null ? 62 : 76;
+        }
+        Callout(p, op, x, y + h - 42, w);
     }
 
     /// A table drawn from shapes, cell by cell: unlike a table of PowerPoint's own, its cells can hold equations.
@@ -6271,6 +6444,17 @@ static class Program
         hi = Math.Ceiling(hi / step - 1e-9) * step;
     }
 
+    /// An axis from a start the author fixed: finer steps, and no reaching back to zero.
+    static void Pinned(double from, double to, out double lo, out double hi, out double step)
+    {
+        if (to <= from) to = from + 1;
+        double raw = (to - from) / 7, power = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+        step = 10 * power;
+        foreach (double m in new double[] { 1, 2, 2.5, 5, 10 }) if (m * power >= raw) { step = m * power; break; }
+        lo = Math.Floor(from / step + 1e-9) * step;
+        hi = Math.Ceiling(to / step - 1e-9) * step;
+    }
+
     static string Tick(double value, double step)
     {
         int decimals = step >= 1 ? 0 : (int)Math.Min(4, Math.Ceiling(-Math.Log10(step) - 1e-9));
@@ -6323,13 +6507,30 @@ static class Program
         if (chart.TryGetValue("yMin", out raw) && raw != null) y0 = Number(raw);
         if (chart.TryGetValue("yMax", out raw) && raw != null) y1 = Number(raw);
         double xs1, ys1;
+        // An end of an axis the author fixed stays where it was put.
+        double fx0 = x0, fx1 = x1, fy0 = y0, fy1 = y1;
+        bool pinX = chart.TryGetValue("xMin", out raw) && raw != null, pinY = chart.TryGetValue("yMin", out raw) && raw != null;
         Axis(ref x0, ref x1, out xs1);
         Axis(ref y0, ref y1, out ys1);
+        if (pinX && x0 < fx0) Pinned(fx0, fx1, out x0, out x1, out xs1);
+        if (pinY && y0 < fy0) Pinned(fy0, fy1, out y0, out y1, out ys1);
         string xTitle = chart.TryGetValue("xTitle", out raw) && raw != null ? Convert.ToString(raw) : null;
         string yTitle = chart.TryGetValue("yTitle", out raw) && raw != null ? Convert.ToString(raw) : chart.TryGetValue("unit", out raw) && raw != null ? Convert.ToString(raw) : null;
         bool fit = chart.TryGetValue("fit", out raw) && raw != null && (Truthy(raw) || Convert.ToString(raw).ToLowerInvariant() == "true");
         string[] tones = Palette(p);
-        bool legend = m > 1;
+        for (int s = 0; s < m; s++)
+        {
+            Dictionary<string, object> one = series[s] as Dictionary<string, object>;
+            if (one != null && one.TryGetValue("color", out raw) && raw != null) tones[s] = Tone(p, Convert.ToString(raw), tones[s]);
+        }
+        string where = chart.TryGetValue("legend", out raw) && raw != null ? Convert.ToString(raw).ToLowerInvariant() : "";
+        bool named = false;
+        foreach (string one in names) if (one.Length > 0) named = true;
+        // Lines are named where they end, which reads faster than a legend; a scatter keeps the legend.
+        bool ends = named && where != "top" && where != "none" && (where == "end" || type != "scatter");
+        bool legend = m > 1 && !ends && where != "none";
+        double margin = 14;
+        if (ends) { foreach (string one in names) { double wide = 0; foreach (char ch in one) wide += ch > 255 ? 11.5 : 6.5; margin = Math.Max(margin, Math.Min(170, wide + 60)); } }
         if (yTitle != null) Label(p, x, y, 300, 14, yTitle, 9.5, t.Muted, false, t.BodyFont, 1, 1, null);
         if (legend)
         {
@@ -6343,7 +6544,8 @@ static class Program
             }
         }
         double head = yTitle != null || legend ? 22 : 6, axis = 46, foot = xTitle != null ? 42 : 24;
-        double px = x + axis, pw = w - axis - 14, py = y + head + 10, ph = h - head - 10 - foot;
+        double px = x + axis, pw = w - axis - margin, py = y + head + 10, ph = h - head - 10 - foot;
+        List<double[]> tips = new List<double[]>();   // where each named line ends: series, height on the slide, last value
         for (double gy = y0; gy <= y1 + ys1 * 1e-6; gy += ys1)
         {
             double sy = py + ph - ph * (gy - y0) / (y1 - y0);
@@ -6379,7 +6581,15 @@ static class Program
                     path.Fill.Visible = 0;
                     path.Line.ForeColor.RGB = Bgr(tones[s]);
                     path.Line.Weight = 2.25f * p.S;
+                    Dictionary<string, object> meant = series[s] as Dictionary<string, object>;
+                    object dash;
+                    if (meant != null && meant.TryGetValue("dashed", out dash) && dash != null && (Truthy(dash) || Convert.ToString(dash).ToLowerInvariant() == "true")) { try { path.Line.DashStyle = 4; } catch (Exception) { } }
                     p.Motion.Add(path);
+                }
+                if (ends && names[s].Length > 0)
+                {
+                    double[] last = points[points.Count - 1];
+                    tips.Add(new double[] { s, py + ph - ph * (Math.Max(y0, Math.Min(y1, last[1])) - y0) / (y1 - y0), last[1] });
                 }
             }
             if (!joined[s] || points.Count <= 14)
@@ -6415,6 +6625,77 @@ static class Program
                     Label(p, px + pw - 250, py + 4 + s * 16, 244, 14, "y = " + slope.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "x" + sign + Math.Abs(cut).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "，R² = " + r2.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture), 10, s == 0 ? t.Accent : tones[s], false, t.BodyFont, 3, 1, null);
                 }
             }
+        }
+        bool withValues = chart.TryGetValue("endValues", out raw) && raw != null && (Truthy(raw) || Convert.ToString(raw).ToLowerInvariant() == "true");
+        Tips(p, tips, names, tones, px + pw + 8, py + 8, py + ph - 8, margin - 10, withValues);
+        // Lines to read against: a threshold, a moment in time.
+        IList marks = chart.TryGetValue("lines", out raw) ? raw as IList : null;
+        if (marks != null)
+        {
+            foreach (object mark in marks)
+            {
+                Dictionary<string, object> at = mark as Dictionary<string, object>;
+                if (at == null) continue;
+                object value;
+                string text = at.TryGetValue("text", out value) && value != null ? Convert.ToString(value) : null;
+                if (at.TryGetValue("y", out value) && value != null)
+                {
+                    double gy = Number(value);
+                    if (gy < y0 || gy > y1) continue;
+                    double sy = py + ph - ph * (gy - y0) / (y1 - y0);
+                    dynamic rule = Rule(p, px, sy, px + pw, sy, t.Accent, 1);
+                    try { rule.Line.DashStyle = 4; } catch (Exception) { }
+                    if (text != null) Label(p, px + 6, sy - 16, pw - 12, 14, text, 9.5, t.Accent, false, t.BodyFont, 1, 1, null);
+                }
+                else if (at.TryGetValue("x", out value) && value != null)
+                {
+                    double gx = Number(value);
+                    if (gx < x0 || gx > x1) continue;
+                    double sx = px + pw * (gx - x0) / (x1 - x0);
+                    dynamic rule = Rule(p, sx, py, sx, py + ph, t.Accent, 1);
+                    try { rule.Line.DashStyle = 4; } catch (Exception) { }
+                    if (text != null) Label(p, sx + 5, py + 2, 200, 14, text, 9.5, t.Accent, false, t.BodyFont, 1, 1, null);
+                }
+            }
+        }
+        // Words set at a point of the plot, with a mark on the point.
+        IList said = chart.TryGetValue("annotations", out raw) ? raw as IList : null;
+        if (said != null)
+        {
+            foreach (object one in said)
+            {
+                Dictionary<string, object> at = one as Dictionary<string, object>;
+                object value;
+                if (at == null || !at.TryGetValue("text", out value) || value == null) continue;
+                string text = Convert.ToString(value);
+                double gx = at.TryGetValue("x", out value) ? Number(value) : (x0 + x1) / 2, gy = at.TryGetValue("y", out value) ? Number(value) : (y0 + y1) / 2;
+                double sx = px + pw * (Math.Max(x0, Math.Min(x1, gx)) - x0) / (x1 - x0), sy = py + ph - ph * (Math.Max(y0, Math.Min(y1, gy)) - y0) / (y1 - y0);
+                Dot(p, sx, sy, 4, t.Accent);
+                // The words go to the side that has room.
+                bool left = sx > px + pw * 0.62, below = sy < py + 44;
+                double tw = Math.Min(240, pw * 0.45), tx = left ? sx - tw - 10 : sx + 10, ty = below ? sy + 10 : sy - 34;
+                Rule(p, sx, sy, left ? tx + tw : tx, ty + (below ? 0 : 26), t.Accent, 0.75);
+                Label(p, tx, ty, tw, 28, text, 10.5, t.Accent, true, t.BodyFont, left ? 3 : 1, below ? 1 : 4, null).Name = "Annotation";
+            }
+        }
+    }
+
+    /// The names of lines at their ends, moved apart where two would lie on one another.
+    static void Tips(Page p, List<double[]> tips, List<string> names, string[] tones, double x, double top, double bottom, double width, bool values)
+    {
+        if (tips.Count == 0) return;
+        Theme t = p.T;
+        tips.Sort(delegate(double[] a, double[] b) { return a[1].CompareTo(b[1]); });
+        double gap = values ? 30 : 17;
+        // Downwards so that none overlaps the one above; then upwards, should the last have left the plot.
+        for (int i = 1; i < tips.Count; i++) if (tips[i][1] < tips[i - 1][1] + gap) tips[i][1] = tips[i - 1][1] + gap;
+        if (tips[tips.Count - 1][1] > bottom) { tips[tips.Count - 1][1] = bottom; for (int i = tips.Count - 2; i >= 0; i--) if (tips[i][1] > tips[i + 1][1] - gap) tips[i][1] = tips[i + 1][1] - gap; }
+        foreach (double[] tip in tips)
+        {
+            int s = (int)tip[0];
+            string text = names[s] + (values ? "\r" + Short(tip[2]) : "");
+            dynamic label = Label(p, x, tip[1] - (values ? 15 : 8), width, values ? 30 : 16, text, 10, tones[s] == t.Line ? t.Text : tones[s], true, t.BodyFont, 1, 3, null);
+            label.Name = "Series " + (s + 1);
         }
     }
 
