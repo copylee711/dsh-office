@@ -1535,8 +1535,17 @@ static class Program
         int start = (int)range.Start, made = 0;
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
-        // WPS does not build an equation from its linear text, nor where it is told to: the formulas stay as written.
-        if (Suite == "wps") { MathSkipped += found.Count; return 0; }
+        // WPS does not build an equation from its linear text, nor where it is told to: there the formulas come
+        // converted already (see Omml), and are put in as they are.
+        if (Suite == "wps")
+        {
+            for (int k = found.Count - 1; k >= 0; k--)
+            {
+                try { if (WpsMath(doc, range, start, found[k])) made++; else MathSkipped++; }
+                catch (Exception error) { MathSkipped++; Trace("formula in WPS: " + error.Message.Trim()); }
+            }
+            return made;
+        }
         // All the formulas of this piece of text are read by Word in one round.
         List<string> sources = new List<string>();
         foreach (System.Text.RegularExpressions.Match m in found)
@@ -1632,13 +1641,69 @@ static class Program
     /// Formulas that could not be turned into equations during the current operation (they stay as text).
     static int MathFailed;
 
-    /// Formulas met while working in WPS, which has no equations built for it yet.
+    /// Formulas met while working in WPS that could not be put in as equations.
     static int MathSkipped;
+    /// Formulas met on the slides of a WPS deck: no equations there yet.
+    static int SlideMathSkipped;
+
+    /// The formulas of the batch at hand as OMML, made by the plugin for WPS: "d:" + source for one on a line of its
+    /// own, "i:" + source for one inside a line.
+    static Dictionary<string, object> Omml;
+
+    static string FlatDocument(string paragraph)
+    {
+        return "<?xml version=\"1.0\" standalone=\"yes\"?><pkg:package xmlns:pkg=\"http://schemas.microsoft.com/office/2006/xmlPackage\">"
+            + "<pkg:part pkg:name=\"/_rels/.rels\" pkg:contentType=\"application/vnd.openxmlformats-package.relationships+xml\"><pkg:xmlData><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships></pkg:xmlData></pkg:part>"
+            + "<pkg:part pkg:name=\"/word/document.xml\" pkg:contentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"><pkg:xmlData><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><w:body><w:p>"
+            + paragraph + "</w:p></w:body></w:document></pkg:xmlData></pkg:part></pkg:package>";
+    }
+
+    /// One formula of a WPS document: the text between the dollar signs gives way to the equation.
+    static bool WpsMath(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m)
+    {
+        bool display = m.Groups[1].Success;
+        string source = (display ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+        string tag = null;
+        System.Text.RegularExpressions.Match tagged = Tag.Match(source);
+        if (tagged.Success) { tag = tagged.Groups[1].Value.Trim(); source = source.Remove(tagged.Index, tagged.Length).Trim(); }
+        object made;
+        if (Omml == null || !Omml.TryGetValue((display ? "d:" : "i:") + source, out made) || !(made is string)) return false;
+        dynamic spot = null;
+        if (m.Length <= 250)
+        {
+            dynamic search = range.Duplicate;
+            if ((bool)search.Find.Execute(FindText: m.Value.Replace("^", "^^"), MatchCase: true, MatchWildcards: false, Forward: true, Wrap: 0)) spot = search;
+        }
+        if (spot == null) spot = doc.Range(start + m.Index, start + m.Index + m.Length);
+        int at = (int)spot.Start, paragraphs = (int)doc.Paragraphs.Count, maths = (int)doc.OMaths.Count;
+        string omml = (string)made;
+        if (display && !string.IsNullOrEmpty(tag)) omml = omml.Replace("</m:oMath>", "<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space=\"preserve\">\u2003\u2003(" + System.Security.SecurityElement.Escape(tag) + ")</m:t></m:r></m:oMath>");
+        spot.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"center\"/></m:oMathParaPr>" + omml + "</m:oMathPara>" : omml));
+        if ((int)doc.OMaths.Count <= maths) return false;
+        // The piece comes in as a paragraph: the mark it brought is taken out again, so the line stays one line.
+        if ((int)doc.Paragraphs.Count > paragraphs)
+        {
+            try
+            {
+                dynamic line = doc.Range(at, at).Paragraphs[1].Range;
+                int end = (int)line.End;
+                doc.Range(end - 1, end).Delete();
+            }
+            catch (Exception error) { Trace("formula in WPS, joining the line: " + error.Message.Trim()); }
+        }
+        if (display)
+        {
+            try { dynamic format = doc.Range(at, at).Paragraphs[1].Format; format.Alignment = 1; format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f; if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f; }
+            catch (Exception) { }
+        }
+        Cramped = true;
+        return true;
+    }
 
     static string SkippedNote()
     {
         if (MathSkipped == 0) return "";
-        string note = "NOTE " + MathSkipped + " formula(s) were left as text between dollar signs: equations are not built in WPS Office yet. Tell the user; if the formulas matter, the document needs Microsoft Office";
+        string note = "NOTE " + MathSkipped + " formula(s) could not be made into equations in WPS Office and were left as text between dollar signs: rewrite them in plainer LaTeX, or tell the user";
         MathSkipped = 0;
         return note;
     }
@@ -4879,7 +4944,7 @@ static class Program
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
         Trace("text of " + text.Length + " chars with " + found.Count + " formula(s): " + Clip(text, 60));
-        if (Suite == "wps") { MathSkipped += found.Count; return 0; }
+        if (Suite == "wps") { SlideMathSkipped += found.Count; return 0; }
         if (!MathSource()) { PptMathFailed += found.Count; return 0; }
         SaveClipboard();
         int made = 0;
@@ -7661,6 +7726,7 @@ static class Program
         // The settings give the two modes, until the user flips one on the card.
         if (!Card.FollowChosen) Following = a.Flag("follow", false);
         if (!Card.TypingChosen) Typing = a.Flag("typing", false);
+        Omml = a.Raw("math") as Dictionary<string, object>;
         bool card = a.Flag("card", false);
         bool quiet = false;
         try { string whole = (string)doc.FullName; quiet = Hidden.Contains(whole) || (a.Flag("silent", false) && !Revealed.Contains(whole)); } catch (Exception) { }
@@ -7709,7 +7775,8 @@ static class Program
                 try { MathDone(); } catch (Exception) { }
                 if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
                 PptMathFailed = 0;
-                if (MathSkipped > 0) done.Add("(" + SkippedNote() + ")");
+                if (SlideMathSkipped > 0) done.Add("(NOTE " + SlideMathSkipped + " formula(s) were left as text between dollar signs: WPS Presentation takes no equations from here yet. Write short ones in plain characters instead (x², α ≤ β, Σ), and tell the user that formulas on slides need PowerPoint)");
+                SlideMathSkipped = 0;
             }
             if (kind == "word")
             {
