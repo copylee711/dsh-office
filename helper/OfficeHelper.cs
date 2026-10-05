@@ -2723,6 +2723,7 @@ static class Program
             else p.Range.ParagraphFormat.SpaceAfter = Air;
             return "image inserted" + (Nested ? "" : SmallNote());
         }
+        if (type == "insert_diagram" || type == "insert_flowchart") return Diagram(doc, op);
         if (type == "insert_references") return References(doc, op);
         if (type == "style_format") return StyleFormat(doc, op);
         if (type == "page_setup") return PageSetup(doc, op);
@@ -3109,6 +3110,302 @@ static class Program
         if (op.Has("left")) setup.LeftMargin = (float)op.Num("left", 3.17) * cm;
         if (op.Has("right")) setup.RightMargin = (float)op.Num("right", 3.17) * cm;
         return "page setup changed";
+    }
+
+    // ───────────────────────── diagrams in a document ─────────────────────────
+
+    // A flow chart or block diagram drawn in the document with its own shapes: boxes with text in them, and
+    // connectors between the boxes. They stand on a drawing canvas that sits in line with the text, like a picture,
+    // and every one of them can be selected and changed in Word afterwards.
+
+    static int DiagramShape(string name)
+    {
+        switch ((name ?? "rect").ToLowerInvariant())
+        {
+            case "round": case "rounded": case "step": return 5;
+            case "diamond": case "decision": return 4;
+            case "ellipse": case "oval": case "circle": return 9;
+            case "start": case "end": case "terminator": return 69;
+            case "io": case "data": case "input": case "output": case "parallelogram": return 2;
+            case "document": return 67;
+            case "database": case "cylinder": return 13;
+            case "rect": case "process": case "box": return 1;
+        }
+        throw new Fail("BAD_ARGS", "Unknown node shape \"" + name + "\": use rect, round, diamond, ellipse, terminator, io, document or database.");
+    }
+
+    /// Fill, outline (null for none) and text colour of a node of a kind in a look.
+    static string[] DiagramLook(string look, int kind, string accent)
+    {
+        if (look == "outline") return new string[] { "#FFFFFF", "#000000", "#000000" };
+        if (look == "classic") return new string[] { "#F3F6FB", "#44546A", "#1F2933" };
+        if (kind == 69 || kind == 9) return new string[] { accent, null, "#FFFFFF" };
+        if (kind == 4) return new string[] { "#FFF4DE", "#F1C36B", "#5A4208" };
+        if (kind == 2) return new string[] { "#E7F6EF", "#9FD7BF", "#134E38" };
+        if (kind == 67 || kind == 13) return new string[] { "#F2F4F7", "#CBD1DB", "#2B3340" };
+        return new string[] { Mix(accent, "#FFFFFF", 0.9), Mix(accent, "#FFFFFF", 0.6), Mix(accent, "#101828", 0.72) };
+    }
+
+    /// The middle of a side of a box [x, y, w, h].
+    static double[] SidePoint(double[] b, string side)
+    {
+        if (side == "top") return new double[] { b[0] + b[2] / 2, b[1] };
+        if (side == "bottom") return new double[] { b[0] + b[2] / 2, b[1] + b[3] };
+        if (side == "left") return new double[] { b[0], b[1] + b[3] / 2 };
+        return new double[] { b[0] + b[2], b[1] + b[3] / 2 };
+    }
+
+    /// The way from one side of a box to a side of another, in straight runs with square corners.
+    static List<double[]> Route(double[] a, string from, double[] b, string to)
+    {
+        double[] s = SidePoint(a, from), e = SidePoint(b, to);
+        List<double[]> path = new List<double[]>();
+        path.Add(s);
+        bool upright1 = from == "top" || from == "bottom", upright2 = to == "top" || to == "bottom";
+        const double clear = 18;
+        if (upright1 && upright2)
+        {
+            if (from != to)
+            {
+                if (Math.Abs(s[0] - e[0]) > 0.5) { double mid = (s[1] + e[1]) / 2; path.Add(new double[] { s[0], mid }); path.Add(new double[] { e[0], mid }); }
+            }
+            else
+            {
+                double y = from == "bottom" ? Math.Max(s[1], e[1]) + clear : Math.Min(s[1], e[1]) - clear;
+                path.Add(new double[] { s[0], y }); path.Add(new double[] { e[0], y });
+            }
+        }
+        else if (!upright1 && !upright2)
+        {
+            if (from != to)
+            {
+                if (Math.Abs(s[1] - e[1]) > 0.5) { double mid = (s[0] + e[0]) / 2; path.Add(new double[] { mid, s[1] }); path.Add(new double[] { mid, e[1] }); }
+            }
+            else
+            {
+                double x = from == "right" ? Math.Max(s[0], e[0]) + clear : Math.Min(s[0], e[0]) - clear;
+                path.Add(new double[] { x, s[1] }); path.Add(new double[] { x, e[1] });
+            }
+        }
+        else if (upright1) path.Add(new double[] { s[0], e[1] });
+        else path.Add(new double[] { e[0], s[1] });
+        path.Add(e);
+        return path;
+    }
+
+    static string Diagram(dynamic doc, Bag op)
+    {
+        IList nodes = op.List("nodes"), edges = op.List("edges") ?? new ArrayList();
+        if (nodes == null || nodes.Count == 0) throw new Fail("BAD_ARGS", "insert_diagram needs \"nodes\": [{id, text, row, col, shape?}, ..] and usually \"edges\": [{from, to, label?}, ..].");
+        dynamic p = NewParagraph(doc, op);
+        string bodyFont = null, bodyFarEast = null;
+        try { if ((int)p.OutlineLevel == 10) { bodyFont = (string)p.Range.Font.Name; bodyFarEast = (string)p.Range.Font.NameFarEast; } } catch (Exception) { }
+        Plain(p, "Normal");
+        Follow(doc, p.Range);
+        double room = 415;
+        try { dynamic page = doc.PageSetup; room = (double)page.PageWidth - (double)page.LeftMargin - (double)page.RightMargin; } catch (Exception) { }
+        // Where the boxes stand: on a grid of rows and columns, or where "box" says, in points from the top left.
+        int rows = 0, cols = 0;
+        foreach (object raw in nodes) { Bag n = new Bag(raw); rows = Math.Max(rows, n.Int("row", 1)); cols = Math.Max(cols, n.Int("col", 1)); }
+        double cellW = Math.Min(op.Points("cellWidth", 150), (room - 4) / Math.Max(1, cols)), cellH = op.Points("cellHeight", 76);
+        double nodeW = Math.Min(op.Points("nodeWidth", 112), cellW - 26), nodeH = Math.Min(op.Points("nodeHeight", 40), cellH - 26);
+        // The look. "modern" (the default): flat tinted boxes without heavy outlines, start and end in the accent
+        // colour, decisions in a warm tone, thin grey connectors, a sans type. "outline": white boxes with thin black
+        // lines in the type of the text, as papers and theses print them. "classic": pale blue with dark outlines.
+        string look = op.Str("style", "modern").ToLowerInvariant();
+        if (look != "modern" && look != "outline" && look != "classic") throw new Fail("BAD_ARGS", "\"style\" of a diagram is modern, outline or classic.");
+        string accent = op.Str("accent", "#3B6FD9");
+        float size = (float)op.Num("size", look == "modern" ? 10 : 10.5);
+        string fill = op.Str("fill", null), line = op.Str("color", null), ink = op.Str("ink", null);
+        string wire = op.Str("color", look == "modern" ? "#8B95A7" : look == "outline" ? "#000000" : "#44546A");
+        string face = op.Str("font", look == "modern" ? "微软雅黑" : null);
+        float stroke = look == "classic" ? 1f : 0.75f;
+        Dictionary<string, double[]> boxes = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
+        List<object[]> planned = new List<object[]>();
+        double width = cols * cellW, height = rows * cellH;
+        int order = 0;
+        foreach (object raw in nodes)
+        {
+            order++;
+            Bag n = new Bag(raw);
+            string id = n.Str("id", "n" + order), shape = n.Str("shape", "rect");
+            int kind = DiagramShape(shape);
+            // In the modern look a plain step has softly rounded corners too.
+            if (kind == 1 && look == "modern" && !n.Has("shape")) kind = 5;
+            // A diamond holds text in its middle half only: it is made as wide as its longest line asks for, up to its cell.
+            double longest = 0;
+            foreach (string part in Lines(n.Raw("text") ?? id).Split('\r')) { double units = 0; foreach (char ch in part) units += ch > 0x7F ? 1 : 0.55; longest = Math.Max(longest, units); }
+            double w = n.Points("width", kind == 4 ? Math.Min(cellW - 4, Math.Max(nodeW + 14, longest * n.Num("size", size) * 2.15 + 10)) : nodeW), h = n.Points("height", kind == 4 ? Math.Min(nodeH + 20, cellH - 12) : nodeH);
+            double[] box;
+            IList given = n.List("box");
+            if (given != null && given.Count >= 4) box = new double[] { Convert.ToDouble(given[0]), Convert.ToDouble(given[1]), Convert.ToDouble(given[2]), Convert.ToDouble(given[3]) };
+            else
+            {
+                int row = Math.Max(1, n.Int("row", 1)), col = Math.Max(1, n.Int("col", 1));
+                box = new double[] { (col - 1) * cellW + (cellW - w) / 2, (row - 1) * cellH + (cellH - h) / 2, w, h };
+            }
+            if (boxes.ContainsKey(id)) throw new Fail("BAD_ARGS", "Two nodes are called \"" + id + "\": every node needs an id of its own.");
+            boxes[id] = box;
+            width = Math.Max(width, box[0] + box[2] + 2); height = Math.Max(height, box[1] + box[3] + 2);
+            // Still too long for its diamond: the type is set a little smaller rather than broken over two lines.
+            double fits = kind == 4 && longest > 0 ? Math.Max(0.72, Math.Min(1, (box[2] - 6) / (longest * n.Num("size", size) * 2.15))) : 1;
+            planned.Add(new object[] { id, kind, box, n, fits });
+        }
+        // The ways are laid before anything is drawn: one that leaves the grid makes the canvas that much larger.
+        List<object[]> ways = new List<object[]>();
+        int index = 0;
+        foreach (object raw in edges)
+        {
+            index++;
+            Bag e = new Bag(raw);
+            string from = e.Need("from"), to = e.Need("to");
+            double[] a, b;
+            if (!boxes.TryGetValue(from, out a) || !boxes.TryGetValue(to, out b)) throw new Fail("BAD_ARGS", "Edge " + index + " joins \"" + from + "\" and \"" + to + "\", but there is no node \"" + (boxes.ContainsKey(from) ? to : from) + "\". Node ids: " + string.Join(", ", new List<string>(boxes.Keys).ToArray()) + ".");
+            double dx = (b[0] + b[2] / 2) - (a[0] + a[2] / 2), dy = (b[1] + b[3] / 2) - (a[1] + a[3] / 2);
+            string s1, s2;
+            if (dy > a[3] / 2) { s1 = "bottom"; s2 = "top"; }
+            else if (dy < -a[3] / 2) { if (Math.Abs(dx) < 1) { s1 = "right"; s2 = "right"; } else { s1 = dx > 0 ? "right" : "left"; s2 = "bottom"; } }
+            else { s1 = dx >= 0 ? "right" : "left"; s2 = dx >= 0 ? "left" : "right"; }
+            s1 = e.Str("fromSide", s1).ToLowerInvariant(); s2 = e.Str("toSide", s2).ToLowerInvariant();
+            foreach (string side in new string[] { s1, s2 }) if (side != "top" && side != "bottom" && side != "left" && side != "right") throw new Fail("BAD_ARGS", "A side is top, bottom, left or right, not \"" + side + "\".");
+            List<double[]> path = Route(a, s1, b, s2);
+            foreach (double[] point in path) { width = Math.Max(width, point[0] + 30); height = Math.Max(height, point[1] + 6); }
+            ways.Add(new object[] { path, e, s1 });
+        }
+        double shift = 0, lift = 0;
+        foreach (object[] way in ways) foreach (double[] point in (List<double[]>)way[0]) { shift = Math.Max(shift, 30 - point[0]); lift = Math.Max(lift, 6 - point[1]); }
+        width += shift; height += lift;
+        double scale = width > room ? room / width : 1;
+        object anchor = doc.Range((int)p.Range.Start, (int)p.Range.Start);
+        dynamic canvas = doc.Shapes.AddCanvas(Left: 0f, Top: 0f, Width: (float)(width * scale), Height: (float)(height * scale), Anchor: ref anchor);
+        try { if (Math.Abs((float)canvas.Height - (float)(height * scale)) > 1f) canvas.Height = (float)(height * scale); if (Math.Abs((float)canvas.Width - (float)(width * scale)) > 1f) canvas.Width = (float)(width * scale); } catch (Exception) { }
+        try { Trace("canvas " + (float)canvas.Width + " x " + (float)canvas.Height + ", meant " + Math.Round(width * scale) + " x " + Math.Round(height * scale)); } catch (Exception) { }
+        try { Trace("canvas anchored at " + (int)canvas.Anchor.Start + ", its paragraph starts at " + (int)p.Range.Start + " of " + (int)doc.Content.End); } catch (Exception error) { Trace("canvas anchor: " + error.Message); }
+        dynamic items = canvas.CanvasItems;
+        Func<double, float> X = delegate(double x) { return (float)((x + shift) * scale); };
+        Func<double, float> Y = delegate(double y) { return (float)((y + lift) * scale); };
+        int drawn = 0;
+        foreach (object[] one in planned)
+        {
+            double[] box = (double[])one[2];
+            Bag n = (Bag)one[3];
+            dynamic shape = items.AddShape((int)one[1], X(box[0]), Y(box[1]), (float)(box[2] * scale), (float)(box[3] * scale));
+            try { shape.Name = "Node " + (string)one[0]; } catch (Exception) { }
+            string[] tones = DiagramLook(look, (int)one[1], accent);
+            shape.Fill.ForeColor.RGB = Bgr(n.Str("fill", fill ?? tones[0]));
+            string edge = n.Str("color", line ?? tones[1]);
+            if (edge == null) { try { shape.Line.Visible = 0; } catch (Exception) { } }
+            else { shape.Line.ForeColor.RGB = Bgr(edge); shape.Line.Weight = stroke; }
+            // Softly rounded corners.
+            if (look == "modern" && (int)one[1] == 5) { try { shape.Adjustments[1] = 0.22f; } catch (Exception) { } }
+            try { shape.Shadow.Visible = 0; } catch (Exception) { }
+            dynamic frame = shape.TextFrame;
+            try { float inset = (int)one[1] == 4 ? 0f : 3f; frame.MarginLeft = inset; frame.MarginRight = inset; frame.MarginTop = inset > 0 ? 1f : 0f; frame.MarginBottom = inset > 0 ? 1f : 0f; frame.WordWrap = -1; } catch (Exception) { }
+            try { frame.VerticalAnchor = 3; } catch (Exception) { }
+            dynamic text = frame.TextRange;
+            text.Text = Lines(n.Raw("text") ?? (string)one[0]);
+            text = frame.TextRange;
+            try { text.Style = -1; } catch (Exception) { }
+            text.Font.Size = (float)(n.Num("size", size) * Math.Max(0.8, scale) * (double)one[4]);
+            text.Font.Color = Bgr(n.Str("ink", ink ?? tones[2]));
+            text.Font.Bold = n.Flag("bold", false) ? 1 : 0;
+            if (face != null) { try { text.Font.Name = face; text.Font.NameFarEast = face; } catch (Exception) { } }
+            else if (!string.IsNullOrEmpty(bodyFont)) { try { text.Font.Name = bodyFont; if (!string.IsNullOrEmpty(bodyFarEast)) text.Font.NameFarEast = bodyFarEast; } catch (Exception) { } }
+            try
+            {
+                dynamic format = text.ParagraphFormat;
+                format.Alignment = 1; format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; format.LeftIndent = 0;
+                format.SpaceBefore = 0; format.SpaceAfter = 0; format.LineSpacingRule = 0;
+            }
+            catch (Exception) { }
+            drawn++;
+            if (Typing) Thread.Sleep(40);
+        }
+        foreach (object[] way in ways)
+        {
+            List<double[]> path = (List<double[]>)way[0];
+            Bag e = (Bag)way[1];
+            int tone = Bgr(e.Str("color", wire));
+            bool arrow = !e.Has("arrow") || e.On("arrow"), dashed = e.Flag("dashed", false);
+            for (int k = 0; k + 1 < path.Count; k++)
+            {
+                // A line is drawn from its upper left end: WPS turns one drawn the other way round, and its arrow with
+                // it. So a run that goes left or up is drawn backwards, with the arrow at its beginning.
+                float x1 = X(path[k][0]), y1 = Y(path[k][1]), x2 = X(path[k + 1][0]), y2 = Y(path[k + 1][1]);
+                bool back = x2 < x1 - 0.01f || y2 < y1 - 0.01f;
+                dynamic run = back ? items.AddLine(x2, y2, x1, y1) : items.AddLine(x1, y1, x2, y2);
+                try { run.Line.Visible = -1; } catch (Exception) { }
+                // Upright stays upright, level stays level.
+                try { if (Math.Abs(x2 - x1) < 0.01f && (float)run.Width > 0.01f) run.Width = 0f; if (Math.Abs(y2 - y1) < 0.01f && (float)run.Height > 0.01f) run.Height = 0f; } catch (Exception) { }
+                run.Line.ForeColor.RGB = tone;
+                run.Line.Weight = (float)e.Num("weight", look == "modern" ? 1.1 : stroke);
+                if (dashed) { try { run.Line.DashStyle = 4; } catch (Exception) { } }
+                if (arrow && k + 2 == path.Count)
+                {
+                    try { if (back) run.Line.BeginArrowheadStyle = 2; else run.Line.EndArrowheadStyle = 2; } catch (Exception) { }
+                    // A small, slim head.
+                    try { if (back) { run.Line.BeginArrowheadLength = 2; run.Line.BeginArrowheadWidth = 1; } else { run.Line.EndArrowheadLength = 2; run.Line.EndArrowheadWidth = 1; } } catch (Exception) { }
+                }
+                try { run.Name = "Edge " + e.Need("from") + " to " + e.Need("to") + (path.Count > 2 ? " " + (k + 1) : ""); } catch (Exception) { }
+            }
+            if (e.Has("label"))
+            {
+                // Beside the first run, near the box the way leaves: "yes" and "no" belong to the decision they come from.
+                string side = (string)way[2], label = e.Need("label");
+                double lw = Math.Max(22, label.Length * size * 1.1 + 8), lh = size + 6;
+                double lx = path[0][0], ly = path[0][1];
+                if (side == "bottom") { lx += 4; ly += 2; }
+                else if (side == "top") { lx += 4; ly -= lh + 2; }
+                else if (side == "right") { lx += 3; ly -= lh + 1; }
+                else { lx -= lw + 3; ly -= lh + 1; }
+                dynamic tag = items.AddTextbox(1, X(lx), Y(ly), (float)(lw * scale), (float)(lh * scale));
+                try { tag.Line.Visible = 0; tag.Fill.Visible = 0; } catch (Exception) { }
+                dynamic frame = tag.TextFrame;
+                try { frame.MarginLeft = 1; frame.MarginRight = 1; frame.MarginTop = 0; frame.MarginBottom = 0; } catch (Exception) { }
+                dynamic text = frame.TextRange;
+                text.Text = label;
+                text = frame.TextRange;
+                try { text.Style = -1; } catch (Exception) { }
+                text.Font.Size = (float)Math.Max(7, (size - 1.5) * Math.Max(0.8, scale));
+                text.Font.Color = tone;
+                if (face != null) { try { text.Font.Name = face; text.Font.NameFarEast = face; } catch (Exception) { } }
+            else if (!string.IsNullOrEmpty(bodyFont)) { try { text.Font.Name = bodyFont; if (!string.IsNullOrEmpty(bodyFarEast)) text.Font.NameFarEast = bodyFarEast; } catch (Exception) { } }
+                try { dynamic format = text.ParagraphFormat; format.Alignment = side == "left" ? 2 : 0; format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; format.SpaceBefore = 0; format.SpaceAfter = 0; format.LineSpacingRule = 0; } catch (Exception) { }
+                try { tag.Name = "Label " + e.Need("from") + " to " + e.Need("to"); } catch (Exception) { }
+            }
+        }
+        // Drawn, the canvas goes into the line of its paragraph, where it stays with the text like a picture.
+        // Word ties a floating shape to the paragraph nearest to where it stands on the page, whatever anchor it was
+        // given, so the canvas may have gone in elsewhere: it is carried over to its own paragraph.
+        try
+        {
+            dynamic inline = canvas.ConvertToInlineShape();
+            dynamic at = inline.Range;
+            int where = (int)at.Start, home = (int)p.Range.Start;
+            Trace("canvas in line at " + where + ", its paragraph starts at " + home);
+            if (where != home && Suite != "wps")
+            {
+                dynamic target = doc.Range(home, home);
+                target.FormattedText = at.FormattedText;
+                // What stood before the paragraph has moved on by one place if the canvas came in after it.
+                doc.Range(where < home ? where : where + 1, (where < home ? where : where + 1) + 1).Delete();
+            }
+        }
+        catch (Exception error) { Trace("canvas in line: " + error.Message.Trim()); try { canvas.WrapFormat.Type = 7; } catch (Exception) { } }
+        // In WPS a canvas in line leaves no mark in the text: its paragraph reads as empty, and text added "at the
+        // end" would be written into it, beside the drawing. A character without width keeps the paragraph taken.
+        if (Suite == "wps") { try { int home = (int)p.Range.Start; doc.Range(home, home).InsertAfter("\u200B"); } catch (Exception) { } }
+        try { p.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; p.Range.ParagraphFormat.FirstLineIndent = 0; p.Range.ParagraphFormat.Alignment = 1; } catch (Exception) { }
+        p.Range.ParagraphFormat.SpaceBefore = Air;
+        Cramped = true;
+        if (op.Has("caption"))
+        {
+            dynamic target = p.Range;
+            try { target.MoveEnd(1, -1); } catch (Exception) { }
+            Caption(doc, target, false, op.Need("caption"), bodyFont, bodyFarEast);
+        }
+        else p.Range.ParagraphFormat.SpaceAfter = Air;
+        return "diagram inserted: " + drawn + " node(s), " + ways.Count + " connector(s), " + Math.Round(width * scale) + " x " + Math.Round(height * scale) + " pt" + (scale < 0.999 ? " (scaled to " + Math.Round(scale * 100) + "% to fit the page: fewer columns, or a smaller cellWidth, keeps the text at its size)" : "") + ". Look at it with office_render: text that does not fit its box needs a wider node (nodeWidth, or width on the node) or shorter words";
     }
 
     static string PageNumbers(dynamic doc, Bag op)
