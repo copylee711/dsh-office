@@ -6,9 +6,12 @@
 export type AppKind = 'word' | 'excel' | 'ppt'
 
 export const APP_NAMES: Record<AppKind, string> = { word: 'Word', excel: 'Excel', ppt: 'PowerPoint' }
+export const WPS_NAMES: Record<AppKind, string> = { word: 'WPS Writer', excel: 'WPS Spreadsheets', ppt: 'WPS Presentation' }
+/** The app as the model should name it: WPS has its own names, the tools and operations are the same. */
+export const appName = (on: { app: AppKind; suite?: string }): string => (on.suite === 'wps' ? WPS_NAMES : APP_NAMES)[on.app]
 
-export interface DocInfo { app: AppKind; name: string; path: string | null; saved: boolean; active: boolean; readOnly?: boolean; how?: 'attached' | 'opened' | 'created'; background?: boolean }
-export interface AppStatus { app: AppKind; installed: boolean; running: boolean; version?: string; error?: string; documents: DocInfo[] }
+export interface DocInfo { app: AppKind; suite?: string; name: string; path: string | null; saved: boolean; active: boolean; readOnly?: boolean; how?: 'attached' | 'opened' | 'created'; background?: boolean }
+export interface AppStatus { app: AppKind; suite?: string; installed: boolean; running: boolean; version?: string; error?: string; documents: DocInfo[] }
 
 export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string; open?: boolean; inTable?: boolean }
 export interface WordRead { paragraphs: number; tables: number; pages?: number; from?: number; items?: WordItem[]; more?: string; table?: number; cells?: Array<Array<string | null>> }
@@ -21,7 +24,7 @@ const state = (doc: DocInfo): string => [doc.saved ? 'saved' : 'unsaved changes'
 export function formatStatus(apps: AppStatus[]): string {
   const lines: string[] = []
   for (const app of apps) {
-    const name = APP_NAMES[app.app]
+    const name = appName(app)
     if (!app.installed) { lines.push(`${name}: not installed`); continue }
     if (!app.running && app.documents.length === 0) { lines.push(`${name}: installed, not running (office_open starts it)`); continue }
     if (app.error) { lines.push(`${name}: ${app.error}`); continue }
@@ -34,7 +37,7 @@ export function formatStatus(apps: AppStatus[]): string {
 
 export function formatOpened(doc: DocInfo): string {
   const how = doc.how === 'created' ? 'Created' : doc.how === 'opened' ? 'Opened' : 'Already open, attached to'
-  return `${how} ${doc.path ?? doc.name} in ${APP_NAMES[doc.app]} (${state(doc)}).${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
+  return `${how} ${doc.path ?? doc.name} in ${appName(doc)} (${state(doc)}).${doc.suite === 'wps' ? ' This is WPS Office: the same tools and operations apply, except that formulas ($...$) are not built into equations there yet — they stay as text; say so to the user if the document has formulas.' : ''}${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
 }
 
 const BODY_STYLES = new Set(['normal', '正文', 'body text'])

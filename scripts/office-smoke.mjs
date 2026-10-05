@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const keep = args.includes('--keep')
+// --wps runs the same steps in WPS Office (the helper reads the suite from its environment).
+if (args.includes('--wps')) process.env.DSH_OFFICE_SUITE = 'wps'
 const apps = ['word', 'excel', 'ppt'].filter(app => args.includes(app))
 if (apps.length === 0) apps.push('word', 'excel', 'ppt')
 
@@ -157,7 +159,7 @@ console.log('timings:', timings.join(', '))
 console.log('files:', dir)
 child.stdin.end()
 await new Promise(resolve => child.on('exit', resolve))
-const after = execFileSync('tasklist', ['/fo', 'csv', '/nh'], { encoding: 'utf8' }).split('\n').filter(line => /WINWORD|EXCEL\.EXE|POWERPNT/i.test(line)).map(line => line.split(',')[0])
+const after = execFileSync('tasklist', ['/fo', 'csv', '/nh'], { encoding: 'utf8' }).split('\n').filter(line => /WINWORD|EXCEL\.EXE|POWERPNT|^"(et|wpp)\.exe/i.test(line)).map(line => line.split(',')[0])
 console.log('office processes still running:', after.join(' ') || '(none)')
 console.log(failures === 0 ? 'ALL OK' : `${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

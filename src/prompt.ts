@@ -16,7 +16,7 @@ export function redirectText(skill: string, app: 'word' | 'excel' | 'ppt'): stri
 export function promptText(): string {
   return [
     '# Office documents (Word, Excel, PowerPoint)',
-    'The office_ tools work inside the real Office apps on this computer: the document is open in its window, every change you make appears there at once, and the user can read and edit alongside you.',
+    'The office_ tools work inside the real Office apps on this computer (Microsoft Office, or WPS Office where that is what the user has — the tools and operations are the same): the document is open in its window, every change you make appears there at once, and the user can read and edit alongside you.',
     '- For any Word, Excel or PowerPoint work, creating a new document included, start with office_open (it starts the app if it is not running, and a path that does not exist yet creates the file), then office_read and office_edit. Do not load the office-docx / office-xlsx / office-pptx skills and do not write the file with a script: an open file cannot be overwritten, and the user would not see the work.',
     '- Put all the changes you can into one office_edit call; it runs them in order. What it can do in an app (the operations and their fields) is listed with the result of your first office_open or office_read there, and by office_help; it covers formulas, tables, pictures, SmartArt diagrams, shapes, styles and page layout, so look there before reaching for anything else.',
     '- The user may edit while you work. Read again before editing a part you have not just read, and pass "expect" on Word paragraphs.',

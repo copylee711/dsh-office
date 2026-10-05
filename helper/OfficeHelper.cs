@@ -430,6 +430,7 @@ static class Program
     {
         while (error is System.Reflection.TargetInvocationException && error.InnerException != null) error = error.InnerException;
         Fail fail = error as Fail;
+        if (fail == null) Trace("error: " + error);
         if (fail != null) { code = fail.Code; return fail.Message; }
         COMException com = error as COMException;
         if (com != null)
@@ -449,15 +450,66 @@ static class Program
 
     // ───────────────────────── applications and documents ─────────────────────────
 
-    static string ProgId(string kind)
+    /// Which suite the command at hand is carried out in: "office" (Microsoft) or "wps" (WPS Office, which answers to
+    /// the same object model under names of its own).
+    static string Suite = "office";
+
+    static string ProgId(string kind) { return ProgId(kind, Suite); }
+
+    static string ProgId(string kind, string suite)
     {
-        if (kind == "word") return "Word.Application";
-        if (kind == "excel") return "Excel.Application";
-        if (kind == "ppt") return "PowerPoint.Application";
+        bool wps = suite == "wps";
+        if (kind == "word") return wps ? "KWPS.Application" : "Word.Application";
+        if (kind == "excel") return wps ? "KET.Application" : "Excel.Application";
+        if (kind == "ppt") return wps ? "KWPP.Application" : "PowerPoint.Application";
         throw new Fail("BAD_ARGS", "Unknown app \"" + kind + "\": use word, excel or ppt.");
     }
 
-    static string AppName(string kind) { return kind == "word" ? "Word" : kind == "excel" ? "Excel" : "PowerPoint"; }
+    static string AppName(string kind)
+    {
+        if (Suite == "wps") return kind == "word" ? "WPS Writer" : kind == "excel" ? "WPS Spreadsheets" : "WPS Presentation";
+        return kind == "word" ? "Word" : kind == "excel" ? "Excel" : "PowerPoint";
+    }
+
+    static readonly string[] Suites = new string[] { "office", "wps" };
+
+    /// What an app we hold or started is filed under: the suite is part of it, since both may be at work.
+    static string Key(string kind) { return Suite + ":" + kind; }
+
+    static bool Installed(string kind, string suite)
+    {
+        try { return Type.GetTypeFromProgID(ProgId(kind, suite)) != null; } catch (Exception) { return false; }
+    }
+
+    /// The suite a command goes to. A document that is open already is worked on where it is, whichever suite that
+    /// is; a file yet to be opened goes to the suite asked for, or — left to us — to Microsoft Office when it is
+    /// installed and to WPS when it is not.
+    static string SuiteFor(string kind, Bag a)
+    {
+        string want = a.Str("suite", Environment.GetEnvironmentVariable("DSH_OFFICE_SUITE") ?? "auto").ToLowerInvariant();
+        if (want != "office" && want != "wps") want = "auto";
+        string first = want == "wps" || (want == "auto" && !Installed(kind, "office") && Installed(kind, "wps")) ? "wps" : "office";
+        string doc = a.Str("doc", a.Str("path", null));
+        string keep = Suite;
+        try
+        {
+            foreach (string suite in new string[] { first, first == "wps" ? "office" : "wps" })
+            {
+                Suite = suite;
+                try
+                {
+                    foreach (dynamic app in new object[] { OwnApp(kind, false), Running(kind) })
+                    {
+                        if (app == null) continue;
+                        if (doc == null ? (int)Docs(kind, app).Count > 0 : Find(kind, app, doc) != null) return suite;
+                    }
+                }
+                catch (Exception) { }
+            }
+        }
+        finally { Suite = keep; }
+        return first;
+    }
 
     static string KindOfPath(string path)
     {
@@ -533,7 +585,7 @@ static class Program
                     using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(pid))
                     {
                         string name = process.ProcessName.ToUpperInvariant();
-                        if ((name == "WINWORD" || name == "EXCEL") && process.MainWindowHandle == IntPtr.Zero) process.Kill();
+                        if ((name == "WINWORD" || name == "EXCEL" || name == "WPS" || name == "ET" || name == "WPP") && process.MainWindowHandle == IntPtr.Zero) process.Kill();
                     }
                 }
                 catch (Exception) { }
@@ -546,10 +598,10 @@ static class Program
     static dynamic OwnApp(string kind, bool start)
     {
         object held;
-        if (Own.TryGetValue(kind, out held))
+        if (Own.TryGetValue(Key(kind), out held))
         {
             try { string alive = Convert.ToString(((dynamic)held).Version); return held; }
-            catch (Exception) { Own.Remove(kind); }
+            catch (Exception) { Own.Remove(Key(kind)); }
         }
         if (!start) return null;
         if (kind == "ppt")
@@ -557,7 +609,7 @@ static class Program
             // PowerPoint runs once per session: the user's if it is open, else one we start — which stays alive only
             // while it is held, having no window of its own.
             dynamic deckApp = App(kind, true);
-            Own[kind] = deckApp;
+            Own[Key(kind)] = deckApp;
             return deckApp;
         }
         Type type = Type.GetTypeFromProgID(ProgId(kind));
@@ -573,7 +625,7 @@ static class Program
         try { app.Visible = false; } catch (Exception) { }
         try { if (kind == "word") app.DisplayAlerts = 0; else app.DisplayAlerts = false; } catch (Exception) { }
         if (kind == "excel") { try { NoteOwn(Convert.ToInt64(app.Hwnd)); } catch (Exception) { } }
-        Own[kind] = app;
+        Own[Key(kind)] = app;
         return app;
     }
 
@@ -653,8 +705,10 @@ static class Program
     static object Settle()
     {
         List<object> said = new List<object>();
+        foreach (string suite in Suites)
         foreach (string kind in new string[] { "word", "excel", "ppt" })
         {
+            Suite = suite;
             dynamic app = OwnApp(kind, false);
             if (app == null) continue;
             List<object> mine = new List<object>();
@@ -689,15 +743,15 @@ static class Program
             {
                 bool seen = false;
                 try { seen = Truthy(app.Visible); } catch (Exception) { }
-                if (kind != "ppt" && (int)Docs(kind, app).Count == 0) { app.Quit(); Own.Remove(kind); }
+                if (kind != "ppt" && (int)Docs(kind, app).Count == 0) { app.Quit(); Own.Remove(Key(kind)); }
                 else if (kind != "ppt" && !seen) { }   // still holds something of ours: stays for the next turn
                 else if (kind == "ppt")
                 {
                     // Ours to end only if we started it, it holds nothing and shows nothing; else it is just let go of.
                     bool shown = false;
                     try { shown = Truthy(app.Visible); } catch (Exception) { }
-                    if (Started.Contains(kind) && !shown && (int)app.Presentations.Count == 0) { app.Quit(); Started.Remove(kind); }
-                    Own.Remove(kind);
+                    if (Started.Contains(Key(kind)) && !shown && (int)app.Presentations.Count == 0) { app.Quit(); Started.Remove(Key(kind)); }
+                    Own.Remove(Key(kind));
                 }
             }
             catch (Exception) { }
@@ -706,6 +760,7 @@ static class Program
         // The apps go only once nothing here refers to them any more.
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); GC.WaitForPendingFinalizers();
         if (Own.Count == 0) { try { File.Delete(OwnNotePath()); } catch (Exception) { } }
+        Suite = "office";
         return said;
     }
 
@@ -717,7 +772,7 @@ static class Program
         Type type = Type.GetTypeFromProgID(ProgId(kind));
         if (type == null) throw new Fail("NOT_INSTALLED", AppName(kind) + " is not installed on this computer.");
         app = Activator.CreateInstance(type);
-        Started.Add(kind);
+        Started.Add(Key(kind));
         // Started by automation, Excel would quit once we let go of it; hand it to the user.
         if (kind == "excel") { try { app.UserControl = true; } catch (Exception) { } }
         return app;
@@ -785,6 +840,7 @@ static class Program
         Dictionary<string, object> info = new Dictionary<string, object>();
         string full = (string)doc.FullName;
         info["app"] = kind;
+        if (Suite == "wps") info["suite"] = "wps";
         info["name"] = (string)doc.Name;
         info["path"] = ((string)doc.Path).Length == 0 ? null : full;
         info["saved"] = Truthy(doc.Saved);
@@ -821,6 +877,7 @@ static class Program
         if (cmd == "status") return Status();
         if (cmd == "settle") return Settle();
         string kind = Kind(a);
+        Suite = SuiteFor(kind, a);
         if (cmd == "open") return Open(kind, a);
         if (cmd == "quit")
         {
@@ -871,11 +928,16 @@ static class Program
     static object Status()
     {
         List<object> apps = new List<object>();
+        foreach (string suite in Suites)
         foreach (string kind in new string[] { "word", "excel", "ppt" })
         {
+            Suite = suite;
+            // WPS is listed where it is there to be used; Microsoft Office always, so that its absence shows.
+            if (suite == "wps" && !Installed(kind, suite)) continue;
             Dictionary<string, object> entry = new Dictionary<string, object>();
             entry["app"] = kind;
-            entry["installed"] = Type.GetTypeFromProgID(ProgId(kind)) != null;
+            entry["suite"] = suite;
+            entry["installed"] = Installed(kind, suite);
             List<object> open = new List<object>();
             dynamic app = Running(kind);
             entry["running"] = app != null;
@@ -909,6 +971,7 @@ static class Program
             entry["documents"] = open;
             apps.Add(entry);
         }
+        Suite = "office";
         return apps;
     }
 
@@ -1036,14 +1099,14 @@ static class Program
         if (inOwn)
         {
             if (kind == "word") doc.Close(save ? -1 : 0); else doc.Close(save);
-            try { if ((int)Docs(kind, mine).Count == 0) { mine.Quit(); Own.Remove(kind); } } catch (Exception) { }
+            try { if ((int)Docs(kind, mine).Count == 0) { mine.Quit(); Own.Remove(Key(kind)); } } catch (Exception) { }
             return "closed";
         }
         if (kind == "word") doc.Close(save ? -1 : 0);
         else if (kind == "excel") doc.Close(save);
         else { if (save) doc.Save(); else doc.Saved = -1; doc.Close(); }
         // An app this helper started itself, now holding nothing, would be left as an empty window: it goes too.
-        if (Started.Contains(kind))
+        if (Started.Contains(Key(kind)))
         {
             try
             {
@@ -1051,7 +1114,7 @@ static class Program
                 if (app != null && (int)(kind == "word" ? app.Documents.Count : kind == "excel" ? app.Workbooks.Count : app.Presentations.Count) == 0)
                 {
                     app.Quit();
-                    Started.Remove(kind);
+                    Started.Remove(Key(kind));
                     return "closed (and " + AppName(kind) + ", which was started for it, was closed too)";
                 }
             }
@@ -1141,6 +1204,7 @@ static class Program
         string bare = Path.GetFileNameWithoutExtension(name);
         uint owner = 0;
         try { GetWindowThreadProcessId(new IntPtr(Convert.ToInt64(doc.Application.HWND)), out owner); } catch (Exception) { }
+        bool wps = Suite == "wps";
         IntPtr best = IntPtr.Zero;
         int bestScore = 0;
         EnumWindows(delegate(IntPtr window, IntPtr state)
@@ -1155,6 +1219,12 @@ static class Program
             GetWindowThreadProcessId(window, out pid);
             string type = kind.ToString();
             bool frame = type == "PPTFrameClass" || type == "OpusApp" || type == "XLMAIN";
+            if (!frame && wps && title.Length > 0)
+            {
+                // WPS Presentation hands out no window at all: its frame is the window of a WPS process that carries the file name.
+                try { using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById((int)pid)) { string exe = process.ProcessName.ToLowerInvariant(); frame = exe == "wps" || exe == "wpp" || exe == "et" || exe == "wpsoffice"; } }
+                catch (Exception) { }
+            }
             if (!frame && (owner == 0 || pid != owner)) return true;
             int score = (frame ? 4 : 0) + (owner != 0 && pid == owner ? 2 : 0) + (title.StartsWith(name, StringComparison.OrdinalIgnoreCase) || title.StartsWith(bare, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
             if (score > bestScore) { bestScore = score; best = window; }
@@ -1465,6 +1535,8 @@ static class Program
         int start = (int)range.Start, made = 0;
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
+        // WPS does not build an equation from its linear text, nor where it is told to: the formulas stay as written.
+        if (Suite == "wps") { MathSkipped += found.Count; return 0; }
         // All the formulas of this piece of text are read by Word in one round.
         List<string> sources = new List<string>();
         foreach (System.Text.RegularExpressions.Match m in found)
@@ -1560,9 +1632,21 @@ static class Program
     /// Formulas that could not be turned into equations during the current operation (they stay as text).
     static int MathFailed;
 
+    /// Formulas met while working in WPS, which has no equations built for it yet.
+    static int MathSkipped;
+
+    static string SkippedNote()
+    {
+        if (MathSkipped == 0) return "";
+        string note = "NOTE " + MathSkipped + " formula(s) were left as text between dollar signs: equations are not built in WPS Office yet. Tell the user; if the formulas matter, the document needs Microsoft Office";
+        MathSkipped = 0;
+        return note;
+    }
+
     static string MathNote()
     {
         SetOff();
+        if (MathSkipped > 0) return " — " + SkippedNote();
         if (MathFailed == 0) return "";
         string note = " — NOTE " + MathFailed + " formula(s) could not be built and were left as text: check them with office_render and rewrite them more simply";
         MathFailed = 0;
@@ -1835,7 +1919,10 @@ static class Program
                     int tableStart = (int)table.Range.Start, end = (int)table.Range.End;
                     if (tableStart != openTable)
                     {
-                        int inside = (int)table.Range.Paragraphs.Count, cells = (int)table.Range.Cells.Count, rows = (int)table.Rows.Count;
+                        int inside = (int)table.Range.Paragraphs.Count, rows = (int)table.Rows.Count, cells;
+                        // WPS has no Range.Cells: there the cells are counted as rows times columns.
+                        try { cells = (int)table.Range.Cells.Count; }
+                        catch (Exception) { try { cells = rows * (int)table.Columns.Count; } catch (Exception) { cells = inside - rows; } }
                         bool nested = false;
                         try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
                         Dictionary<string, object> head = new Dictionary<string, object>();
@@ -2123,7 +2210,21 @@ static class Program
     static void Plain(dynamic paragraph, string style)
     {
         SetStyle(paragraph.Range, style);
-        try { paragraph.Range.Font.Reset(); paragraph.Range.ParagraphFormat.Reset(); } catch (COMException) { }
+        try { paragraph.Range.Font.Reset(); Unformat(paragraph.Range); } catch (COMException) { }
+    }
+
+    /// Back to what the style says. In WPS the call for that takes the style itself away — and a table apart, into
+    /// rows that are tables of their own — so there the settings a paragraph usually carries are cleared one by one.
+    static void Unformat(dynamic range)
+    {
+        if (Suite != "wps") { range.ParagraphFormat.Reset(); return; }
+        try
+        {
+            dynamic format = range.ParagraphFormat;
+            format.LeftIndent = 0; format.RightIndent = 0;
+            format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0;
+        }
+        catch (Exception) { }
     }
 
     static bool IsCaption(dynamic doc, dynamic para)
@@ -2437,7 +2538,7 @@ static class Program
             SetStyle(table.Range, "Normal");
             try
             {
-                table.Range.Font.Reset(); table.Range.ParagraphFormat.Reset();
+                table.Range.Font.Reset(); Unformat(table.Range);
                 table.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; table.Range.ParagraphFormat.FirstLineIndent = 0;
             }
             catch (COMException) { }
@@ -2449,9 +2550,14 @@ static class Program
                 if (fontSize > 4 && fontSize < 100) table.Range.Font.Size = fontSize;
                 table.Range.ParagraphFormat.Alignment = 1;
                 Whole(table.Range);
-                table.Range.Cells.VerticalAlignment = 1;
             }
             catch (COMException) { }
+            try { table.Range.Cells.VerticalAlignment = 1; }
+            catch (Exception)
+            {
+                // WPS: cell by cell.
+                try { for (int r = 1; r <= rows; r++) for (int c = 1; c <= cols; c++) table.Cell(r, c).VerticalAlignment = 1; } catch (Exception) { }
+            }
             Rules(table, op.Str("borders", "grid"));
             try { table.AutoFitBehavior(2); } catch (COMException) { }
             if (data != null)
@@ -3574,6 +3680,27 @@ static class Program
     }
 
     /// Fill in or change a chart from the fields of an operation.
+    /// The title of a chart. WPS turns the call down while it is still laying out a chart whose series were just
+    /// moved to another type or axis: it is asked again, and then by the other way there is to ask.
+    static void Titled(dynamic chart, string title)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                if (attempt == 2) chart.SetElement(2); else chart.HasTitle = true;
+                chart.ChartTitle.Text = title;
+                return;
+            }
+            catch (Exception error)
+            {
+                Trace("chart title, attempt " + attempt + ": " + error.Message.Trim());
+                if (Suite != "wps" || attempt >= 3) throw;
+                Thread.Sleep(250);
+            }
+        }
+    }
+
     static string Chart(dynamic book, dynamic ws, dynamic holder, Bag op, bool fresh)
     {
         dynamic chart = holder.Chart;
@@ -3619,7 +3746,7 @@ static class Program
                 if (item.Has("color")) { try { one.Format.Fill.ForeColor.RGB = Bgr(item.Need("color")); one.Format.Line.ForeColor.RGB = Bgr(item.Need("color")); } catch (Exception) { } }
             }
         }
-        if (op.Has("title")) { chart.HasTitle = true; chart.ChartTitle.Text = op.Need("title"); try { chart.ChartTitle.Font.Size = 13; chart.ChartTitle.Font.Bold = true; } catch (Exception) { } }
+        if (op.Has("title")) { Titled(chart, op.Need("title")); try { chart.ChartTitle.Font.Size = 13; chart.ChartTitle.Font.Bold = true; } catch (Exception) { } }
         else if (fresh) { try { chart.HasTitle = false; } catch (Exception) { } }
         bool round = kind == "pie" || kind == "doughnut" || kind == "donut" || kind == "radar";
         if (op.Has("xTitle") && !round) { try { chart.Axes(1).HasTitle = true; chart.Axes(1).AxisTitle.Text = op.Need("xTitle"); } catch (Exception) { } }
@@ -3864,7 +3991,28 @@ static class Program
                 if (whole ? string.Equals(s, find, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) : s.IndexOf(find, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) >= 0) count++;
             }
             if (count == 0) return "\"" + find + "\" does not occur in " + (string)target.Address[false, false] + ": nothing replaced";
-            target.Replace(What: find.Replace("~", "~~").Replace("*", "~*").Replace("?", "~?"), Replacement: with, LookAt: whole ? 1 : 2, MatchCase: matchCase);
+            if (Suite == "wps")
+            {
+                // WPS replaces again inside what it has just put in ("P" to "P-" gives "P--"): done here instead, on
+                // the cells that hold text, the formulas left as they are.
+                System.Text.RegularExpressions.Regex pattern = new System.Text.RegularExpressions.Regex(whole ? "^" + System.Text.RegularExpressions.Regex.Escape(find) + "\u0024" : System.Text.RegularExpressions.Regex.Escape(find), matchCase ? System.Text.RegularExpressions.RegexOptions.None : System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string put = with.Replace("\u0024", "\u0024\u0024");
+                object raw = target.Formula;
+                object[,] cells = raw as object[,];
+                if (cells == null) { string one = raw as string; if (one != null && !one.StartsWith("=", StringComparison.Ordinal)) target.Formula = pattern.Replace(one, put); }
+                else
+                {
+                    for (int r = cells.GetLowerBound(0); r <= cells.GetUpperBound(0); r++)
+                        for (int c = cells.GetLowerBound(1); c <= cells.GetUpperBound(1); c++)
+                        {
+                            string text = cells[r, c] as string;
+                            if (text == null || text.StartsWith("=", StringComparison.Ordinal) || !(grid[r, c] is string)) continue;
+                            cells[r, c] = pattern.Replace(text, put);
+                        }
+                    target.Formula = cells;
+                }
+            }
+            else target.Replace(What: find.Replace("~", "~~").Replace("*", "~*").Replace("?", "~?"), Replacement: with, LookAt: whole ? 1 : 2, MatchCase: matchCase);
             return "replaced in " + count + " cell(s) of " + (string)target.Address[false, false];
         }
         if (type == "clean")
@@ -4362,10 +4510,12 @@ static class Program
             int index;
             if (int.TryParse(key, out index)) return slide.Shapes[index];
             try { return slide.Shapes[key]; }
-            catch (COMException) { foreach (dynamic shape in Leaves(slide)) if ((string)shape.Name == key) return shape; throw; }
+            catch (Exception) { foreach (dynamic shape in Leaves(slide)) if ((string)shape.Name == key) return shape; throw; }
         }
-        catch (COMException)
+        catch (Exception error)
         {
+            // WPS answers a name it does not have with an argument error, not with one of its own.
+            if (!(error is COMException) && !(error is ArgumentException)) throw;
             List<string> names = new List<string>();
             foreach (dynamic shape in Leaves(slide)) { if (names.Count < 40) names.Add("\"" + (string)shape.Name + "\" #" + (int)shape.Id); }
             throw new Fail("ANCHOR_MISSING", "Slide " + (int)slide.SlideIndex + " has no shape \"" + key + "\". Shapes: " + (names.Count == 0 ? "(none)" : string.Join(", ", names.ToArray())) + ".");
@@ -4729,6 +4879,7 @@ static class Program
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
         Trace("text of " + text.Length + " chars with " + found.Count + " formula(s): " + Clip(text, 60));
+        if (Suite == "wps") { MathSkipped += found.Count; return 0; }
         if (!MathSource()) { PptMathFailed += found.Count; return 0; }
         SaveClipboard();
         int made = 0;
@@ -7558,6 +7709,7 @@ static class Program
                 try { MathDone(); } catch (Exception) { }
                 if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
                 PptMathFailed = 0;
+                if (MathSkipped > 0) done.Add("(" + SkippedNote() + ")");
             }
             if (kind == "word")
             {

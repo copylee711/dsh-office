@@ -26,6 +26,7 @@ export const inject = ['tools', 'attachments']
 export const STATUS_ROUTE = '/api/dsh-office/status'
 
 export interface Config {
+  suite?: string
   silent?: boolean
   follow?: boolean
   typing?: boolean
@@ -37,6 +38,10 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  suite: z.string().default('auto').volatile().i18n({
+    'zh-CN': { $description: '办公套件：auto（自动：装了微软 Office 就用它，否则用 WPS）| office（微软 Office）| wps（WPS Office）。已经打开着的文档始终在它所在的软件里修改' },
+    'en-US': { $description: 'Office suite: auto (Microsoft Office when installed, else WPS) | office | wps. A document that is already open is always edited where it is' },
+  }),
   follow: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '跟随 AI 正在修改的位置（自动滚动到那里）；关闭为静默执行，不动你的视图' },
     'en-US': { $description: 'Scroll to where the AI is editing; off = silent, your view is left alone' },
@@ -83,7 +88,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     return
   }
   const settings = (): Settings => resolveConfig(config)
-  const helper = new HelperClient(message => ctx.logger.warn(message))
+  const client = new HelperClient(message => ctx.logger.warn(message))
+  // Every command says which suite the user chose; the helper still follows a document to where it is open.
+  const helper = {
+    call: <T = unknown>(cmd: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> => client.call<T>(cmd, { suite: settings().suite, ...args }, timeoutMs),
+    onEvent: (listener: Parameters<HelperClient['onEvent']>[0]) => client.onEvent(listener),
+    dispose: (): void => client.dispose(),
+  }
   ctx.effect(() => () => helper.dispose(), 'office: helper')
 
   // Vision support per provider/model route, resolved once.

@@ -54,14 +54,16 @@ export async function ensureHelperExe(source = helperSourcePath()): Promise<stri
   building ??= (async () => {
     const code = await readFile(source)
     const hash = createHash('sha256').update(code).digest('hex').slice(0, 12)
-    const dir = join(cacheRoot(), `helper-${hash}`)
+    // With DSH_OFFICE_DEBUG=1 the helper is built with line numbers for the stack traces it then writes to stderr.
+    const debug = process.env.DSH_OFFICE_DEBUG === '1'
+    const dir = join(cacheRoot(), `helper-${hash}${debug ? '-debug' : ''}`)
     const exe = join(dir, 'office-helper.exe')
     if (existsSync(exe)) return exe
     await mkdir(dir, { recursive: true })
     const fw = frameworkDir()
     const temp = join(dir, `build-${process.pid}-${Date.now()}.exe`)
     const args = [
-      '-nologo', '-optimize+', '-target:exe', `-out:${temp}`,
+      '-nologo', ...(debug ? ['-debug:pdbonly'] : ['-optimize+']), '-target:exe', `-out:${temp}`,
       ...REFERENCES.map(ref => `-r:${ref}`), source,
     ]
     await new Promise<void>((resolve, reject) => {
