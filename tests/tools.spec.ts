@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { HelperLike } from '../src/helper-client.js'
-import { DEFAULTS } from '../src/settings.js'
+import { formatOpened, formatStatus } from '../src/format.js'
+import { DEFAULTS, resolveConfig } from '../src/settings.js'
 import { appOf, createTools } from '../src/tools.js'
 
 interface Call { cmd: string; args: Record<string, unknown> }
@@ -25,6 +26,27 @@ function setup(reply: (cmd: string, args: Record<string, unknown>) => unknown, v
   }
   return { calls, run, tools }
 }
+
+describe('the office suite', () => {
+  it('is Microsoft Office or WPS as set, and left to the helper otherwise', () => {
+    expect(resolveConfig({}).suite).toBe('auto')
+    expect(resolveConfig({ suite: { get: () => 'wps' } }).suite).toBe('wps')
+    expect(resolveConfig({ suite: 'libre' }).suite).toBe('auto')
+  })
+
+  it('names the WPS apps and says what is missing there', () => {
+    const doc = { app: 'word' as const, suite: 'wps', name: 'a.docx', path: 'C:\\a.docx', saved: true, active: true, how: 'opened' as const }
+    expect(formatOpened(doc)).toContain('WPS Writer')
+    expect(formatOpened(doc)).toContain('formulas')
+    expect(formatOpened({ ...doc, suite: undefined })).not.toContain('WPS')
+    const status = formatStatus([
+      { app: 'word', suite: 'office', installed: false, running: false, documents: [] },
+      { app: 'excel', suite: 'wps', installed: true, running: true, documents: [{ app: 'excel', suite: 'wps', name: 'b.xlsx', path: 'C:\\b.xlsx', saved: false, active: true }] },
+    ])
+    expect(status).toContain('Word: not installed')
+    expect(status).toContain('WPS Spreadsheets:')
+  })
+})
 
 describe('which app a call is about', () => {
   it('is told from the file extension, or said outright', () => {

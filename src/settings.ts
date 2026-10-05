@@ -7,7 +7,12 @@
 /** The Loader entry id (settings namespace); see cordis.patch.yml. */
 export const ENTRY_ID = 'copylee-office'
 
+/** Which office suite documents are opened in: Microsoft Office, WPS Office, or whichever is there (Microsoft first). */
+export type Suite = 'auto' | 'office' | 'wps'
+
 export interface Settings {
+  /** The suite a file is opened in when it is not open anywhere yet. A document that is open already is worked on where it is. */
+  suite: Suite
   /** Work in the background: no window, no card, text written at once; what was opened is saved and closed when the agent stops. */
   silent: boolean
   /** Scroll the window to where the agent is working; off = silent, the user's view is left alone. */
@@ -27,6 +32,7 @@ export interface Settings {
 }
 
 export const DEFAULTS: Settings = {
+  suite: 'auto',
   silent: false,
   follow: true,
   typing: true,
@@ -49,6 +55,7 @@ export function resolveConfig(raw: unknown): Settings {
   }
   const width = out.renderWidth
   return {
+    suite: out.suite === 'office' || out.suite === 'wps' ? out.suite : DEFAULTS.suite,
     silent: typeof out.silent === 'boolean' ? out.silent : DEFAULTS.silent,
     follow: typeof out.follow === 'boolean' ? out.follow : DEFAULTS.follow,
     typing: typeof out.typing === 'boolean' ? out.typing : DEFAULTS.typing,

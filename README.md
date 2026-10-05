@@ -4,7 +4,7 @@
 
 让 DeepSeek Harness 直接在你电脑上打开的 Word、Excel、PowerPoint 里改文档。AI 不改写文件，而是通过 Office 的自动化接口（COM）让应用自己执行修改，所以改动会实时出现在窗口里，你可以边看边一起编辑，格式不会因为换工具保存而走样。
 
-仅支持 Windows，需要本机装有微软 Office。
+仅支持 Windows，需要本机装有微软 Office 或 WPS Office。
 
 ## 功能
 
@@ -58,7 +58,7 @@ DSH 桌面版：**插件 → 添加插件**，输入 `@copylee/dsh-office`，安
 dsh plugin --profile web add @copylee/dsh-office@latest
 ```
 
-要求：Windows 10 / 11（自带 .NET Framework 4.8），微软 Office（Word、Excel、PowerPoint，装了哪个就能用哪个），DSH 0.2.0-rc.2 或更高。
+要求：Windows 10 / 11（自带 .NET Framework 4.8），微软 Office（Word、Excel、PowerPoint，装了哪个就能用哪个）或 WPS Office（文字、表格、演示），DSH 0.2.0-rc.2 或更高。
 
 ## 使用
 
@@ -97,6 +97,7 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 
 | 设置 | 默认 | 说明 |
 |---|---|---|
+| 办公套件 | 自动 | 新打开的文件用哪个软件：自动（装了微软 Office 就用它，否则用 WPS）、微软 Office、WPS Office。已经打开着的文档始终在它所在的软件里修改 |
 | 跟随 AI 的修改位置 | 开 | 窗口自动滚动到 AI 正在修改的位置；关闭为静默执行 |
 | 逐字写入 | 开 | 文字像打字一样逐步出现；关闭后写得最快 |
 | 静默模式 | 关 | 在后台完成，不弹窗口、不显示卡片、一次写入；回合结束时自动保存并关闭后台打开的文档。开启后“跟随”“逐字写入”“迷你卡片”不再起作用 |
@@ -119,6 +120,7 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 - 引用按编号书写，插入或删除文献后不会自动重新编号。
 - 兼容模式（Word 97–2003 格式）的文档里不能建立原生公式。
 - 目前不支持 WPS。
+- WPS Office 下公式（`$...$`）暂时不会排成公式，保留为文本，AI 会在结果里说明；WPS 文字里窗口不会跟随滚动到修改位置；资源管理器里双击后台文档时的行为没有像微软 Office 那样专门处理。其余操作与微软 Office 相同。
 - 没有打开 Office 时处理文件、批量转换格式不在本插件范围内。
 
 ## 数据与隐私
@@ -137,6 +139,7 @@ pnpm run typecheck
 pnpm test
 pnpm run build
 node scripts/office-smoke.mjs        # 真实 Office：只操作脚本自己在临时目录里新建的文档
+node scripts/office-smoke.mjs --wps  # 同样的步骤，在 WPS Office 里
 ```
 
 ## 许可证

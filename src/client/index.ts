@@ -30,10 +30,12 @@ interface ClientContext {
   }
 }
 
-interface AppStatus { app: 'word' | 'excel' | 'ppt'; installed: boolean; running: boolean; version?: string; error?: string; documents: Array<{ name: string; path: string | null; saved: boolean }> }
+interface AppStatus { app: 'word' | 'excel' | 'ppt'; suite?: string; installed: boolean; running: boolean; version?: string; error?: string; documents: Array<{ name: string; path: string | null; saved: boolean }> }
 interface Status { ok: boolean; error?: string; apps?: AppStatus[] }
 
 const APP_NAMES = { word: 'Word', excel: 'Excel', ppt: 'PowerPoint' } as const
+const WPS_NAMES = { word: 'WPS 文字', excel: 'WPS 表格', ppt: 'WPS 演示' } as const
+const SUITES = [['auto', '自动'], ['office', '微软 Office'], ['wps', 'WPS Office']] as const
 const WIDTHS = [800, 1100, 1400, 1800]
 
 const h = React.createElement
@@ -141,16 +143,23 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
       ),
       status === null ? h('p', { style: S.hint }, '检查中…')
         : !status.ok ? h('div', { style: S.error }, `控制组件不可用：${status.error ?? ''}`)
-        : (status.apps ?? []).map(app => h('div', { key: app.app, style: S.statusLine },
+        : (status.apps ?? []).map(app => h('div', { key: `${app.suite ?? 'office'}-${app.app}`, style: S.statusLine },
           h('span', { style: { ...S.dot, background: !app.installed ? '#999' : app.running ? '#2a2' : ACCENT } }),
-          h('span', { style: { minWidth: 86, fontWeight: 500 } }, APP_NAMES[app.app]),
+          h('span', { style: { minWidth: 86, fontWeight: 500 } }, (app.suite === 'wps' ? WPS_NAMES : APP_NAMES)[app.app]),
           h('span', { style: { ...S.hint, fontSize: 13 } },
             !app.installed ? '未安装'
               : !app.running ? '已安装，未运行（需要时自动启动）'
               : app.documents.length === 0 ? '运行中，没有打开的文档'
               : `运行中：${app.documents.map(doc => doc.name + (doc.saved ? '' : '（未保存）')).join('、')}`),
         )),
-      h('p', { style: S.hint }, '需要本机装有微软 Office。Word 里 AI 的一批修改可以用一次 Ctrl+Z 撤回；Excel 和 PowerPoint 的修改无法用 Ctrl+Z 撤回。你正在单元格里输入或开着对话框时，AI 会等你。'),
+      h('div', { style: S.toggleRow },
+        h('div', { style: S.toggleText }, '办公套件', h('span', { style: { ...S.hint, fontWeight: 400 } }, '新打开的文件用哪个软件。“自动”：装了微软 Office 就用它，否则用 WPS。已经打开着的文档始终在它所在的软件里修改。WPS 下公式暂时不会排成公式，保留为文本。')),
+        h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } }, SUITES.map(([value, label]) => h('button', {
+          key: value, type: 'button', disabled, onClick: () => { void change('suite', value) },
+          style: { ...S.secondary, ...(settings.suite === value ? { background: ACCENT, color: '#fff', borderColor: ACCENT } : {}) },
+        }, label))),
+      ),
+      h('p', { style: S.hint }, '需要本机装有微软 Office 或 WPS Office。Word 里 AI 的一批修改可以用一次 Ctrl+Z 撤回；Excel 和 PowerPoint 的修改无法用 Ctrl+Z 撤回。你正在单元格里输入或开着对话框时，AI 会等你。'),
     ),
 
     h('section', { style: S.card },
