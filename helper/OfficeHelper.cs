@@ -5993,6 +5993,37 @@ static class Program
         IList points = Items(op, "points");
         double usable = h - (points.Count > 0 ? 34 * Math.Min(points.Count, 3) + 12 : 0) - (string.IsNullOrEmpty(op.Str("callout", null)) ? 0 : 54);
         double gap = 28, cw = (w - gap * (perRow - 1)) / perRow, ch = Math.Min(rows == 1 ? 190 : 150, usable / rows);
+        if (rows == 1 && points.Count == 0)
+        {
+            // Nothing else on the slide: each figure on a card of its own, tall, with the number as the main thing.
+            gap = 20; cw = (w - gap * (n - 1)) / n;
+            double tall = Math.Min(usable - 20, 270), top = y + (usable - tall) / 2 - 6;
+            for (int i = 0; i < n; i++)
+            {
+                Unit(p);
+                object one = stats[i];
+                double cx = x + i * (cw + gap);
+                string tone = Pick(p, i), value = Field(one, "value") ?? "", unit = Field(one, "unit"), note = Field(one, "delta") ?? Field(one, "text");
+                dynamic back = Block(p, cx, top, cw, tall, t.Surface, true);
+                Block(p, cx + 22, top, 40, 4, tone, false);
+                double ty = top + 26;
+                if (Icon(p, cx + 22, ty, 28, Field(one, "icon"), tone) != null) ty += 44;
+                double size = value.Length > 7 ? 38 : value.Length > 4 ? 50 : n >= 4 ? 60 : 68;
+                dynamic figure = Label(p, cx + 22, ty, cw - 34, 84, value + (unit == null ? "" : " " + unit), size, tone, true, t.TitleFont, 1, 3, null);
+                if (unit != null)
+                {
+                    try { dynamic tail = figure.TextFrame.TextRange.Characters(value.Length + 1, unit.Length + 1); tail.Font.Size = (float)(18 * p.S); tail.Font.Bold = 0; tail.Font.Color.RGB = Bgr(t.Text); }
+                    catch (Exception) { }
+                }
+                ty += 92;
+                Block(p, cx + 22, ty, 24, 2, t.Line, false);
+                Label(p, cx + 22, ty + 12, cw - 44, note != null ? 44 : top + tall - ty - 26, Field(one, "label") ?? "", 13, t.Text, false, t.BodyFont, 1, 1, t.Accent);
+                if (note != null) Label(p, cx + 22, ty + 60, cw - 44, top + tall - ty - 72, note, 11, t.Muted, false, t.BodyFont, 1, 1, null);
+                p.Motion.Add(back);
+            }
+            Callout(p, op, x, y + h - 42, w);
+            return;
+        }
         y = Settle(y, usable, rows * ch);
         for (int i = 0; i < n; i++)
         {
