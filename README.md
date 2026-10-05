@@ -87,7 +87,7 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 
 `office_edit` 支持的操作：
 
-- Word：`insert_paragraphs`、`set_text`、`replace_text`、`format_text`、`delete_range`、`insert_table`、`set_cell`、`insert_image`、`set_image`、`format_table`、`insert_references`、`style_format`、`page_setup`、`page_numbers`、`header`、`page_break`、`insert_toc`、`update_fields`
+- Word：`insert_diagram`（流程图、结构图：用 Word 自己的形状画在文档里，节点按行列摆放，连线自动走直角，画完仍可逐个编辑）、`insert_paragraphs`、`set_text`、`replace_text`、`format_text`、`delete_range`、`insert_table`、`set_cell`、`insert_image`、`set_image`、`format_table`、`insert_references`、`style_format`、`page_setup`、`page_numbers`、`header`、`page_break`、`insert_toc`、`update_fields`
 - Excel：`write_range`（值或公式）、`format_range`、`autofit`、`insert_rows`、`delete_rows`、`add_sheet`、`rename_sheet`、`delete_sheet`、`add_chart`
 - PowerPoint：`theme`、`slide`、`add_slide`、`set_text`、`format_text`、`add_textbox`、`add_image`、`add_smartart`、`add_table`、`add_shape`、`set_shape`、`delete_shape`、`delete_slide`、`move_slide`、`duplicate_slide`、`set_layout`、`set_background`、`set_notes`
 

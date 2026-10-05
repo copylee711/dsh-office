@@ -142,6 +142,7 @@ describe('office tools', () => {
     expect(help.text).toContain('#RRGGBB')
     const sheets = await run('office_help', { app: 'excel' })
     expect(sheets.text).toContain('pivot {')
+    expect((await run('office_help', { app: 'word' })).text).toContain('insert_diagram {')
     expect(sheets.text).toContain('clean {')
   })
 
