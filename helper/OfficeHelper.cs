@@ -430,6 +430,7 @@ static class Program
     {
         while (error is System.Reflection.TargetInvocationException && error.InnerException != null) error = error.InnerException;
         Fail fail = error as Fail;
+        if (fail == null) Trace("error: " + error);
         if (fail != null) { code = fail.Code; return fail.Message; }
         COMException com = error as COMException;
         if (com != null)
@@ -449,15 +450,66 @@ static class Program
 
     // ───────────────────────── applications and documents ─────────────────────────
 
-    static string ProgId(string kind)
+    /// Which suite the command at hand is carried out in: "office" (Microsoft) or "wps" (WPS Office, which answers to
+    /// the same object model under names of its own).
+    static string Suite = "office";
+
+    static string ProgId(string kind) { return ProgId(kind, Suite); }
+
+    static string ProgId(string kind, string suite)
     {
-        if (kind == "word") return "Word.Application";
-        if (kind == "excel") return "Excel.Application";
-        if (kind == "ppt") return "PowerPoint.Application";
+        bool wps = suite == "wps";
+        if (kind == "word") return wps ? "KWPS.Application" : "Word.Application";
+        if (kind == "excel") return wps ? "KET.Application" : "Excel.Application";
+        if (kind == "ppt") return wps ? "KWPP.Application" : "PowerPoint.Application";
         throw new Fail("BAD_ARGS", "Unknown app \"" + kind + "\": use word, excel or ppt.");
     }
 
-    static string AppName(string kind) { return kind == "word" ? "Word" : kind == "excel" ? "Excel" : "PowerPoint"; }
+    static string AppName(string kind)
+    {
+        if (Suite == "wps") return kind == "word" ? "WPS Writer" : kind == "excel" ? "WPS Spreadsheets" : "WPS Presentation";
+        return kind == "word" ? "Word" : kind == "excel" ? "Excel" : "PowerPoint";
+    }
+
+    static readonly string[] Suites = new string[] { "office", "wps" };
+
+    /// What an app we hold or started is filed under: the suite is part of it, since both may be at work.
+    static string Key(string kind) { return Suite + ":" + kind; }
+
+    static bool Installed(string kind, string suite)
+    {
+        try { return Type.GetTypeFromProgID(ProgId(kind, suite)) != null; } catch (Exception) { return false; }
+    }
+
+    /// The suite a command goes to. A document that is open already is worked on where it is, whichever suite that
+    /// is; a file yet to be opened goes to the suite asked for, or — left to us — to Microsoft Office when it is
+    /// installed and to WPS when it is not.
+    static string SuiteFor(string kind, Bag a)
+    {
+        string want = a.Str("suite", Environment.GetEnvironmentVariable("DSH_OFFICE_SUITE") ?? "auto").ToLowerInvariant();
+        if (want != "office" && want != "wps") want = "auto";
+        string first = want == "wps" || (want == "auto" && !Installed(kind, "office") && Installed(kind, "wps")) ? "wps" : "office";
+        string doc = a.Str("doc", a.Str("path", null));
+        string keep = Suite;
+        try
+        {
+            foreach (string suite in new string[] { first, first == "wps" ? "office" : "wps" })
+            {
+                Suite = suite;
+                try
+                {
+                    foreach (dynamic app in new object[] { OwnApp(kind, false), Running(kind) })
+                    {
+                        if (app == null) continue;
+                        if (doc == null ? (int)Docs(kind, app).Count > 0 : Find(kind, app, doc) != null) return suite;
+                    }
+                }
+                catch (Exception) { }
+            }
+        }
+        finally { Suite = keep; }
+        return first;
+    }
 
     static string KindOfPath(string path)
     {
@@ -546,10 +598,10 @@ static class Program
     static dynamic OwnApp(string kind, bool start)
     {
         object held;
-        if (Own.TryGetValue(kind, out held))
+        if (Own.TryGetValue(Key(kind), out held))
         {
             try { string alive = Convert.ToString(((dynamic)held).Version); return held; }
-            catch (Exception) { Own.Remove(kind); }
+            catch (Exception) { Own.Remove(Key(kind)); }
         }
         if (!start) return null;
         if (kind == "ppt")
@@ -557,7 +609,7 @@ static class Program
             // PowerPoint runs once per session: the user's if it is open, else one we start — which stays alive only
             // while it is held, having no window of its own.
             dynamic deckApp = App(kind, true);
-            Own[kind] = deckApp;
+            Own[Key(kind)] = deckApp;
             return deckApp;
         }
         Type type = Type.GetTypeFromProgID(ProgId(kind));
@@ -573,7 +625,7 @@ static class Program
         try { app.Visible = false; } catch (Exception) { }
         try { if (kind == "word") app.DisplayAlerts = 0; else app.DisplayAlerts = false; } catch (Exception) { }
         if (kind == "excel") { try { NoteOwn(Convert.ToInt64(app.Hwnd)); } catch (Exception) { } }
-        Own[kind] = app;
+        Own[Key(kind)] = app;
         return app;
     }
 
@@ -689,15 +741,15 @@ static class Program
             {
                 bool seen = false;
                 try { seen = Truthy(app.Visible); } catch (Exception) { }
-                if (kind != "ppt" && (int)Docs(kind, app).Count == 0) { app.Quit(); Own.Remove(kind); }
+                if (kind != "ppt" && (int)Docs(kind, app).Count == 0) { app.Quit(); Own.Remove(Key(kind)); }
                 else if (kind != "ppt" && !seen) { }   // still holds something of ours: stays for the next turn
                 else if (kind == "ppt")
                 {
                     // Ours to end only if we started it, it holds nothing and shows nothing; else it is just let go of.
                     bool shown = false;
                     try { shown = Truthy(app.Visible); } catch (Exception) { }
-                    if (Started.Contains(kind) && !shown && (int)app.Presentations.Count == 0) { app.Quit(); Started.Remove(kind); }
-                    Own.Remove(kind);
+                    if (Started.Contains(Key(kind)) && !shown && (int)app.Presentations.Count == 0) { app.Quit(); Started.Remove(Key(kind)); }
+                    Own.Remove(Key(kind));
                 }
             }
             catch (Exception) { }
@@ -717,7 +769,7 @@ static class Program
         Type type = Type.GetTypeFromProgID(ProgId(kind));
         if (type == null) throw new Fail("NOT_INSTALLED", AppName(kind) + " is not installed on this computer.");
         app = Activator.CreateInstance(type);
-        Started.Add(kind);
+        Started.Add(Key(kind));
         // Started by automation, Excel would quit once we let go of it; hand it to the user.
         if (kind == "excel") { try { app.UserControl = true; } catch (Exception) { } }
         return app;
@@ -821,6 +873,7 @@ static class Program
         if (cmd == "status") return Status();
         if (cmd == "settle") return Settle();
         string kind = Kind(a);
+        Suite = SuiteFor(kind, a);
         if (cmd == "open") return Open(kind, a);
         if (cmd == "quit")
         {
@@ -1036,14 +1089,14 @@ static class Program
         if (inOwn)
         {
             if (kind == "word") doc.Close(save ? -1 : 0); else doc.Close(save);
-            try { if ((int)Docs(kind, mine).Count == 0) { mine.Quit(); Own.Remove(kind); } } catch (Exception) { }
+            try { if ((int)Docs(kind, mine).Count == 0) { mine.Quit(); Own.Remove(Key(kind)); } } catch (Exception) { }
             return "closed";
         }
         if (kind == "word") doc.Close(save ? -1 : 0);
         else if (kind == "excel") doc.Close(save);
         else { if (save) doc.Save(); else doc.Saved = -1; doc.Close(); }
         // An app this helper started itself, now holding nothing, would be left as an empty window: it goes too.
-        if (Started.Contains(kind))
+        if (Started.Contains(Key(kind)))
         {
             try
             {
@@ -1051,7 +1104,7 @@ static class Program
                 if (app != null && (int)(kind == "word" ? app.Documents.Count : kind == "excel" ? app.Workbooks.Count : app.Presentations.Count) == 0)
                 {
                     app.Quit();
-                    Started.Remove(kind);
+                    Started.Remove(Key(kind));
                     return "closed (and " + AppName(kind) + ", which was started for it, was closed too)";
                 }
             }
@@ -1835,7 +1888,10 @@ static class Program
                     int tableStart = (int)table.Range.Start, end = (int)table.Range.End;
                     if (tableStart != openTable)
                     {
-                        int inside = (int)table.Range.Paragraphs.Count, cells = (int)table.Range.Cells.Count, rows = (int)table.Rows.Count;
+                        int inside = (int)table.Range.Paragraphs.Count, rows = (int)table.Rows.Count, cells;
+                        // WPS has no Range.Cells: there the cells are counted as rows times columns.
+                        try { cells = (int)table.Range.Cells.Count; }
+                        catch (Exception) { try { cells = rows * (int)table.Columns.Count; } catch (Exception) { cells = inside - rows; } }
                         bool nested = false;
                         try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
                         Dictionary<string, object> head = new Dictionary<string, object>();
@@ -2449,9 +2505,14 @@ static class Program
                 if (fontSize > 4 && fontSize < 100) table.Range.Font.Size = fontSize;
                 table.Range.ParagraphFormat.Alignment = 1;
                 Whole(table.Range);
-                table.Range.Cells.VerticalAlignment = 1;
             }
             catch (COMException) { }
+            try { table.Range.Cells.VerticalAlignment = 1; }
+            catch (Exception)
+            {
+                // WPS: cell by cell.
+                try { for (int r = 1; r <= rows; r++) for (int c = 1; c <= cols; c++) table.Cell(r, c).VerticalAlignment = 1; } catch (Exception) { }
+            }
             Rules(table, op.Str("borders", "grid"));
             try { table.AutoFitBehavior(2); } catch (COMException) { }
             if (data != null)
