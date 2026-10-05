@@ -4872,6 +4872,8 @@ static class Program
         public bool Dark;
         public string Transition = "fade";
         public bool Animate = true;
+        /// What lies behind the content: "" (the flat colour), paper, gradient, grid, dots, or "image:" and a path.
+        public string Texture = "";
         /// How the section slides of the deck look: solid, side, band or number.
         public string Section = "";
         /// A slide of the deck every designed slide is drawn on (a template's background page), 0 = a blank slide.
@@ -4893,8 +4895,11 @@ static class Program
             case "ocean": t.Bg = "#F7FAFC"; t.Surface = "#E4EEF5"; t.Text = "#102A43"; t.Muted = "#627D98"; t.Primary = "#0B7285"; t.Accent = "#E8590C"; t.Line = "#CBD9E4"; break;
             case "graphite": t.Bg = "#FFFFFF"; t.Surface = "#F2F2F2"; t.Text = "#222222"; t.Muted = "#777777"; t.Primary = "#2B2B2B"; t.Accent = "#E8590C"; t.Line = "#DDDDDD"; break;
             case "forest": t.Bg = "#FAFBF7"; t.Surface = "#EAF0E4"; t.Text = "#1F2A1F"; t.Muted = "#6B7A66"; t.Primary = "#2F6B3A"; t.Accent = "#B7791F"; t.Line = "#D5DDCC"; break;
+            case "sepia": t.Bg = "#F5EEDC"; t.Surface = "#EAE0C8"; t.Text = "#3B2F23"; t.Muted = "#7A6A55"; t.Primary = "#7A1F1F"; t.Accent = "#A8782A"; t.Line = "#D9CCAF"; t.TitleFont = "Noto Serif SC"; t.Texture = "paper"; break;
+            case "crimson": t.Bg = "#FFFDF8"; t.Surface = "#F7EDE4"; t.Text = "#2B1D1A"; t.Muted = "#8A7268"; t.Primary = "#B01E23"; t.Accent = "#C89B3C"; t.Line = "#EAD9CC"; t.Texture = "gradient"; break;
+            case "slate": t.Bg = "#F4F6F8"; t.Surface = "#E6EAEE"; t.Text = "#1F2A37"; t.Muted = "#66727F"; t.Primary = "#2F4A63"; t.Accent = "#0FA3B1"; t.Line = "#D3DAE1"; t.Texture = "grid"; break;
             case "plum": t.Bg = "#17131F"; t.Surface = "#231D30"; t.Text = "#F1ECF8"; t.Muted = "#A79FB8"; t.Primary = "#C9A7FF"; t.Accent = "#FF8FA3"; t.Line = "#3A3150"; t.Dark = true; break;
-            default: throw new Fail("BAD_ARGS", "Unknown theme \"" + name + "\": use ink, paper, ocean, forest, graphite (light) or night, chalk, plum (dark), and override single colours if you like.");
+            default: throw new Fail("BAD_ARGS", "Unknown theme \"" + name + "\": use ink, paper, ocean, forest, graphite, sepia, crimson, slate (light) or night, chalk, plum (dark), and override single colours if you like.");
         }
         return t;
     }
@@ -4925,6 +4930,15 @@ static class Program
         if (op.Has("dark")) t.Dark = op.Flag("dark", false);
         if (op.Has("transition")) t.Transition = op.Need("transition").ToLowerInvariant();
         if (op.Has("animate")) t.Animate = op.Flag("animate", true);
+        if (op.Has("background"))
+        {
+            string ground = op.Need("background").Trim();
+            string kind = ground.ToLowerInvariant();
+            if (kind == "plain" || kind == "none" || kind == "flat") t.Texture = "";
+            else if (kind == "paper" || kind == "gradient" || kind == "grid" || kind == "dots") t.Texture = kind;
+            else if (File.Exists(ground)) t.Texture = "image:" + Path.GetFullPath(ground);
+            else throw new Fail("BAD_ARGS", "\"background\" is plain, paper, gradient, grid or dots, or the path of a picture to lay faintly behind every slide; \"" + ground + "\" is neither.");
+        }
         if (op.Has("section")) t.Section = op.Need("section").ToLowerInvariant();
         // Decks should not all open their parts the same way: unless told, one of the looks is taken by chance.
         if (string.IsNullOrEmpty(t.Section)) t.Section = new string[] { "solid", "side", "band", "number" }[new Random().Next(4)];
@@ -4933,7 +4947,107 @@ static class Program
         if (op.Has("area")) t.Area = Box(op.List("area"));
         foreach (string colour in new string[] { t.Bg, t.Surface, t.Text, t.Muted, t.Primary, t.Accent, t.Line }) Bgr(colour);
         try { deck.Tags.Add("DSHTHEME", Json.Serialize(t)); } catch (Exception) { }
-        return "theme \"" + t.Name + "\" set (section slides: " + t.Section + "): it applies to the slides made with the slide operation from here on";
+        return "theme \"" + t.Name + "\" set (background: " + (t.Texture.Length == 0 ? "plain" : t.Texture.StartsWith("image:", StringComparison.Ordinal) ? "a picture" : t.Texture) + "; section slides: " + t.Section + "): it applies to the slides made with the slide operation from here on";
+    }
+
+    /// The picture that lies behind the content of a theme with a textured ground, made once and kept in the temp folder.
+    static string Ground(Theme t)
+    {
+        if (string.IsNullOrEmpty(t.Texture)) return null;
+        string key = t.Texture + "|" + t.Bg + "|" + t.Primary + "|" + t.Line + "|" + t.Dark + "|3";
+        if (t.Texture.StartsWith("image:", StringComparison.Ordinal)) { try { key += File.GetLastWriteTimeUtc(t.Texture.Substring(6)).Ticks; } catch (Exception) { } }
+        uint hash = 2166136261;
+        foreach (char ch in key) { hash ^= ch; hash *= 16777619; }
+        bool photo = t.Texture == "paper" || t.Texture.StartsWith("image:", StringComparison.Ordinal);
+        string file = Path.Combine(Path.GetTempPath(), "dsh-office-ground-" + hash.ToString("x8") + (photo ? ".jpg" : ".png"));
+        if (File.Exists(file)) return file;
+        const int W = 1600, H = 900;
+        Color bg = ColorTranslator.FromHtml(t.Bg);
+        using (Bitmap bitmap = new Bitmap(W, H, PixelFormat.Format24bppRgb))
+        {
+            using (Graphics g = Graphics.FromImage(bitmap))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(bg);
+                if (t.Texture == "gradient")
+                {
+                    // The ground deepens a little towards the lower right, in the theme's own colour.
+                    using (System.Drawing.Drawing2D.LinearGradientBrush brush = new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, W, H), bg, ColorTranslator.FromHtml(Mix(t.Bg, t.Primary, t.Dark ? 0.22 : 0.11)), 35f))
+                        g.FillRectangle(brush, 0, 0, W, H);
+                    using (SolidBrush glow = new SolidBrush(Color.FromArgb(t.Dark ? 16 : 70, t.Dark ? Color.White : ColorTranslator.FromHtml(Mix(t.Bg, "#FFFFFF", 0.7)))))
+                        g.FillEllipse(glow, -W / 4, -H / 2, W, H);
+                }
+                else if (t.Texture == "grid")
+                {
+                    using (Pen pen = new Pen(ColorTranslator.FromHtml(Mix(t.Bg, t.Line, 0.55)), 1f))
+                    {
+                        for (int x = 0; x < W; x += 50) g.DrawLine(pen, x, 0, x, H);
+                        for (int y = 0; y < H; y += 50) g.DrawLine(pen, 0, y, W, y);
+                    }
+                }
+                else if (t.Texture == "dots")
+                {
+                    using (SolidBrush dot = new SolidBrush(ColorTranslator.FromHtml(Mix(t.Bg, t.Line, 0.9))))
+                        for (int y = 20; y < H; y += 36) for (int x = 20; x < W; x += 36) g.FillEllipse(dot, x - 2, y - 2, 4, 4);
+                }
+                else if (t.Texture.StartsWith("image:", StringComparison.Ordinal))
+                {
+                    // The picture, scaled to cover, under a veil of the ground colour: felt rather than seen.
+                    using (Image picture = Image.FromFile(t.Texture.Substring(6)))
+                    {
+                        double scale = Math.Max((double)W / picture.Width, (double)H / picture.Height);
+                        int pw = (int)Math.Ceiling(picture.Width * scale), ph = (int)Math.Ceiling(picture.Height * scale);
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(picture, (W - pw) / 2, (H - ph) / 2, pw, ph);
+                    }
+                    using (SolidBrush veil = new SolidBrush(Color.FromArgb(t.Dark ? 205 : 226, bg))) g.FillRectangle(veil, 0, 0, W, H);
+                }
+                if (t.Texture == "paper")
+                {
+                    // Aged paper: darker towards the edges.
+                    using (System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath())
+                    {
+                        path.AddEllipse(-W * 0.25f, -H * 0.35f, W * 1.5f, H * 1.7f);
+                        using (System.Drawing.Drawing2D.PathGradientBrush brush = new System.Drawing.Drawing2D.PathGradientBrush(path))
+                        {
+                            brush.CenterColor = Color.FromArgb(0, bg);
+                            brush.SurroundColors = new Color[] { Color.FromArgb(t.Dark ? 120 : 70, ColorTranslator.FromHtml(t.Dark ? "#000000" : Mix(t.Bg, "#6B4E1E", 0.5))) };
+                            brush.FocusScales = new PointF(0.55f, 0.5f);
+                            g.FillRectangle(brush, 0, 0, W, H);
+                        }
+                    }
+                }
+            }
+            if (t.Texture == "paper")
+            {
+                // And its grain: every dot a touch lighter or darker.
+                BitmapData data = bitmap.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+                byte[] bytes = new byte[data.Stride * H];
+                Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+                Random chance = new Random(7);
+                for (int y = 0; y < H; y++)
+                {
+                    int row = y * data.Stride;
+                    for (int x = 0; x < W; x++)
+                    {
+                        int delta = chance.Next(-6, 7);
+                        for (int c = 0; c < 3; c++) { int v = bytes[row + x * 3 + c] + delta; bytes[row + x * 3 + c] = (byte)(v < 0 ? 0 : v > 255 ? 255 : v); }
+                    }
+                }
+                Marshal.Copy(bytes, 0, data.Scan0, bytes.Length);
+                bitmap.UnlockBits(data);
+            }
+            if (photo)
+            {
+                ImageCodecInfo jpeg = null;
+                foreach (ImageCodecInfo codec in ImageCodecInfo.GetImageEncoders()) if (codec.MimeType == "image/jpeg") jpeg = codec;
+                EncoderParameters quality = new EncoderParameters(1);
+                quality.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 88L);
+                bitmap.Save(file, jpeg, quality);
+            }
+            else bitmap.Save(file, ImageFormat.Png);
+        }
+        return file;
     }
 
     static double[] Box(IList raw)
@@ -5413,6 +5527,8 @@ static class Program
             p.Slide.Background.Fill.Visible = -1;
             p.Slide.Background.Fill.Solid();
             p.Slide.Background.Fill.ForeColor.RGB = Bgr(t.Bg);
+            try { string ground = Ground(t); if (ground != null) p.Slide.Background.Fill.UserPicture(ground); }
+            catch (Exception error) { Trace("ground: " + error.Message); }
         }
         try { p.Slide.Tags.Add("DSHKIND", kind); } catch (Exception) { }
 
@@ -5501,7 +5617,9 @@ static class Program
                     // The number, very large and faint, fills the right; the words stand at the left over a thin line.
                     if (!string.IsNullOrEmpty(digits))
                     {
-                        dynamic huge = Label(p, 470, 60, 470, 420, digits, 300, strong, true, t.TitleFont, 3, 3, null);
+                        // The line of a text reaches a little past its last letter; at this size that is 80 points,
+                        // so the box ends well inside the slide. Anything past the edge makes PowerPoint show the slide off centre.
+                        dynamic huge = Label(p, 380, 60, 480, 420, digits, 280, strong, true, t.TitleFont, 3, 3, null);
                         huge.Name = "Number";
                         try { huge.TextFrame2.TextRange.Font.Fill.Transparency = t.Dark ? 0.8f : 0.88f; } catch (Exception) { }
                     }
@@ -5520,7 +5638,7 @@ static class Program
                 return "slide " + index + " added (section, theme " + t.Name + ")";
             }
             if (p.Based) { ink = t.Primary; soft = t.Accent; }
-            else p.Slide.Background.Fill.ForeColor.RGB = Bgr(ground);
+            else { p.Slide.Background.Fill.Solid(); p.Slide.Background.Fill.ForeColor.RGB = Bgr(ground); }
             if (image != null) { Photo(p, 0, 0, 960, 540, image); Veil(p, 0, 0, 960, 540, ground, 1, 0.92, 0.55); }
             string number = op.Str("number", null);
             if (!string.IsNullOrEmpty(number))
@@ -5970,7 +6088,11 @@ static class Program
             object raw = steps[i];
             double cx = x + i * cw;
             string tone = i == n - 1 ? t.Accent : t.Primary;
-            dynamic when = Label(p, cx, y + 24, cw - 12, 52, Field(raw, "when") ?? (i + 1).ToString("00"), 30, tone, true, t.TitleFont, 1, 4, null);
+            string date = Field(raw, "when") ?? (i + 1).ToString("00");
+            double units = 0;
+            foreach (char ch in date) units += ch > 255 ? 1.0 : ch == '.' || ch == ' ' || ch == ',' ? 0.32 : 0.6;
+            double fits = Math.Max(13, Math.Min(30, (cw - 16) / Math.Max(1, units * 1.16)));
+            dynamic when = Label(p, cx, y + 24, cw - 12, 52, date, fits < 20 ? fits / 1.2 : fits, tone, true, t.TitleFont, 1, 4, null);
             Dot(p, cx + 8, line, 8, tone);
             Words(p, cx, line + 28, cw - 16, 30, Field(raw, "head") ?? "", 16.5, t.Text, true);
             Words(p, cx, line + 64, cw - 16, h - 170, Field(raw, "text") ?? "", 13.5, t.Muted, false);
