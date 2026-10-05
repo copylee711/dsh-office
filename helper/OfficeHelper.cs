@@ -933,10 +933,12 @@ static class Program
                 if (name == "frac" || name == "dfrac" || name == "tfrac") {
                     string top = TexArg(s, ref i), bottom = TexArg(s, ref i);
                     // A factor written right before the fraction (2rac{a}{b}) must not be read into its numerator.
+                    // After a closing bracket a space is not enough for Word: the fraction is fenced off instead.
+                    bool fenced = o.Length > 0 && ")]〗".IndexOf(o[o.Length - 1]) >= 0;
                     if (o.Length > 0 && char.IsLetterOrDigit(o[o.Length - 1])) o.Append(' ');
                     // A function applied to a fraction (\sin\frac{a}{b}) takes the whole fraction, not just its numerator.
                     bool applied = System.Text.RegularExpressions.Regex.IsMatch(o.ToString(), @"(sin|cos|tan|cot|sinh|cosh|tanh|ln|log|exp)([\^_](\([^()]*\)|[^\s()]+))*\s\z");
-                    o.Append(applied ? "〖(" + top + ")/(" + bottom + ")〗" : "(" + top + ")/(" + bottom + ")");
+                    o.Append(applied || fenced ? "〖(" + top + ")/(" + bottom + ")〗" : "(" + top + ")/(" + bottom + ")");
                     Gap(o, s, i);
                 }
                 else if (name == "sqrt")
@@ -959,6 +961,29 @@ static class Program
                     if (i < s.Length && s[i] == '{') { int end = s.IndexOf('}', i); if (end < 0) end = s.Length; o.Append("\"" + s.Substring(i + 1, end - i - 1) + "\""); i = Math.Min(s.Length, end + 1); }
                 }
                 else if (name == "mathbf" || name == "boldsymbol" || name == "mathit" || name == "mathbb" || name == "mathcal") o.Append(TexArg(s, ref i));
+                else if (name == "not")
+                {
+                    // \not\equiv, \not=, \not\in: the negated sign itself.
+                    while (i < s.Length && s[i] == ' ') i++;
+                    string rest = s.Substring(i);
+                    string[,] negated = { { "\\equiv", "≢" }, { "\\in", "∉" }, { "\\subset", "⊄" }, { "\\approx", "≉" }, { "\\sim", "≁" }, { "\\leq", "≰" }, { "\\geq", "≱" }, { "\\le", "≰" }, { "\\ge", "≱" }, { "\\parallel", "∦" }, { "\\mid", "∤" }, { "\\exists", "∄" }, { "=", "≠" }, { "<", "≮" }, { ">", "≯" } };
+                    bool done = false;
+                    for (int k = 0; k < negated.GetLength(0) && !done; k++)
+                    {
+                        string from = negated[k, 0];
+                        if (!rest.StartsWith(from, StringComparison.Ordinal)) continue;
+                        if (from[0] == '\\' && rest.Length > from.Length && char.IsLetter(rest[from.Length])) continue;
+                        o.Append(negated[k, 1]);
+                        i += from.Length;
+                        done = true;
+                    }
+                    if (!done) o.Append('¬');
+                }
+                else if (name == "left" || name == "right" || name == "bigl" || name == "bigr" || name == "big" || name == "Big" || name == "Bigl" || name == "Bigr")
+                {
+                    // "\left." and "\right." are the invisible partner of a one-sided bracket.
+                    if (i < s.Length && s[i] == '.') i++;
+                }
                 else
                 {
                     string symbol;
@@ -988,6 +1013,14 @@ static class Program
             if (c == '{') { string group = TexArg(s, ref i); o.Append("〖" + group + "〗"); continue; }
             if (c == '}') { i++; continue; }
             if (c == '~') { o.Append(' '); i++; continue; }
+            if (c == '\'')
+            {
+                // X'' is one double prime, not two marks set apart.
+                int marks = 0;
+                while (i < s.Length && s[i] == '\'') { marks++; i++; }
+                o.Append(marks == 1 ? "′" : marks == 2 ? "″" : marks == 3 ? "‴" : new string('′', marks));
+                continue;
+            }
             o.Append(c);
             i++;
         }
@@ -1041,6 +1074,9 @@ static class Program
                 dynamic format = paragraph.Format;
                 if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f;
                 if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f;
+                // Centred on the line, not on what the first-line indent leaves of it.
+                format.CharacterUnitFirstLineIndent = 0;
+                format.FirstLineIndent = 0;
             }
             catch (Exception) { }
         }
@@ -1059,12 +1095,13 @@ static class Program
         int changed = 0, last = -1;
         try
         {
-            int count = (int)doc.OMaths.Count;
+            int maths = (int)doc.OMaths.Count, count = maths + (int)doc.InlineShapes.Count;
             for (int i = 1; i <= count; i++)
             {
                 try
                 {
-                    dynamic paragraph = doc.OMaths[i].Range.Paragraphs[1];
+                    dynamic paragraph = (i <= maths ? doc.OMaths[i].Range : doc.InlineShapes[i - maths].Range).Paragraphs[1];
+                    if (i == maths + 1) last = -1;
                     int start = (int)paragraph.Range.Start;
                     if (start == last) continue;
                     last = start;
@@ -1282,6 +1319,7 @@ static class Program
     {
         if (op.Has("style")) SetStyle(range, op.Need("style"));
         if (op.Has("font")) { string font = op.Need("font"); range.Font.Name = font; try { range.Font.NameFarEast = font; } catch (COMException) { } }
+        if (op.Has("latinFont")) { string latin = op.Need("latinFont"); try { range.Font.NameAscii = latin; range.Font.NameOther = latin; } catch (COMException) { } }
         if (op.Has("size")) range.Font.Size = (float)op.Num("size", 12);
         if (op.Has("bold")) range.Font.Bold = op.Flag("bold", false) ? 1 : 0;
         if (op.Has("italic")) range.Font.Italic = op.Flag("italic", false) ? 1 : 0;
@@ -1312,8 +1350,13 @@ static class Program
         string lower = text.ToLowerInvariant();
         bool cm = lower.Contains("cm") || text.Contains("厘米"), pt = lower.Contains("pt") || text.Contains("磅");
         bool chars = !cm && !pt && (lower.Contains("char") || text.Contains("字") || value <= 4);
-        format.CharacterUnitFirstLineIndent = 0;
-        format.FirstLineIndent = 0;
+        // Twice: on a paragraph that had an indent as a length, the first pass only removes that length and the
+        // paragraph falls back to part of its style's indent; the second pass writes the explicit zero.
+        for (int pass = 0; pass < 2; pass++)
+        {
+            format.CharacterUnitFirstLineIndent = 0;
+            format.FirstLineIndent = 0;
+        }
         if (value == 0) return;
         if (chars) format.CharacterUnitFirstLineIndent = value;
         else format.FirstLineIndent = cm ? value * 28.35f : value;
@@ -1715,6 +1758,7 @@ static class Program
             Plain(p, "Normal");
             Follow(doc, p.Range);
             dynamic picture = p.Range.InlineShapes.AddPicture(FileName: path, LinkToFile: false, SaveWithDocument: true);
+            Cramped = true;
             if (op.Has("width")) { picture.LockAspectRatio = -1; picture.Width = (float)op.Num("width", 300); }
             try { p.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; p.Range.ParagraphFormat.FirstLineIndent = 0; p.Range.ParagraphFormat.Alignment = 1; } catch (COMException) { }
             WordFormat(p.Range, StyleLess(op));
@@ -1749,7 +1793,7 @@ static class Program
     static Bag StyleLess(Bag source)
     {
         Dictionary<string, object> copy = new Dictionary<string, object>();
-        foreach (string key in new string[] { "font", "size", "bold", "italic", "underline", "color", "align", "firstLineIndent", "spaceBefore", "spaceAfter", "lineSpacing", "indentChars", "superscript", "subscript" })
+        foreach (string key in new string[] { "font", "latinFont", "size", "bold", "italic", "underline", "color", "align", "firstLineIndent", "spaceBefore", "spaceAfter", "lineSpacing", "indentChars", "superscript", "subscript" })
             if (source.Has(key)) copy[key] = source.Raw(key);
         return new Bag(copy);
     }
@@ -1810,6 +1854,7 @@ static class Program
                 if ((bool)doc.Bookmarks.Exists(mark)) doc.Bookmarks[mark].Delete();
                 doc.Bookmarks.Add(mark, doc.Range(head + 1, head + 1 + number.Length));
                 listed = true;
+                Listed = true;
                 continue;
             }
             // Inside a formula still written between dollar signs ($[1,2]$ is an interval) it is not a citation.
@@ -1822,6 +1867,50 @@ static class Program
             from = (int)hit.Start + rewritten.Length;
         }
         if (listed) Relink(doc);
+    }
+
+    /// Set when reference entries were written in this batch: the text is then checked for citations of them.
+    static bool Listed;
+
+    /// A reference list nobody cites: said once, at the end of the batch that wrote the list.
+    static string Uncited(dynamic doc)
+    {
+        try
+        {
+            int entries = 0;
+            foreach (dynamic mark in doc.Bookmarks) { if (((string)mark.Name).StartsWith("cite_", StringComparison.Ordinal)) entries++; }
+            if (entries == 0) return "";
+            foreach (dynamic field in doc.Fields) { if (((string)field.Code.Text).IndexOf("REF cite_", StringComparison.Ordinal) >= 0) return ""; }
+            foreach (dynamic link in doc.Hyperlinks)
+            {
+                string target = "";
+                try { target = (string)link.SubAddress; } catch (Exception) { }
+                if (target != null && target.StartsWith("cite_", StringComparison.Ordinal)) return "";
+            }
+            return "(NOTE the reference list has " + entries + " entries but the text cites none of them: put \\cite{n} — or [n] — where each source is used, e.g. with replace_text)";
+        }
+        catch (COMException) { return ""; }
+    }
+
+    /// **text** written in a range becomes bold text (a label such as "摘要：" in front of a paragraph).
+    static void Bold(dynamic doc, dynamic range)
+    {
+        string text = (string)range.Text;
+        if (text == null || text.IndexOf("**", StringComparison.Ordinal) < 0) return;
+        int from = (int)range.Start;
+        for (int guard = 0; guard < 100; guard++)
+        {
+            int end = (int)range.End;
+            if (from >= end) break;
+            dynamic hit = doc.Range(from, end);
+            if (!(bool)hit.Find.Execute(FindText: "\\*\\*[!\\*^13]@\\*\\*", MatchWildcards: true, Forward: true, Wrap: 0)) break;
+            if ((int)hit.End > end || (int)hit.Start < from) break;
+            string found = (string)hit.Text;
+            string inner = found.Substring(2, found.Length - 4);
+            hit.Text = inner;
+            hit.Font.Bold = 1;
+            from = (int)hit.Start + inner.Length;
+        }
     }
 
     /// Citations written before their reference existed are links; once the targets exist, make them cross-references.
@@ -1851,6 +1940,7 @@ static class Program
     {
         string text = (string)range.Text;
         if (text == null) return 0;
+        try { Bold(doc, range); } catch (COMException) { }
         if (text.IndexOf('[') >= 0)
         {
             try { Handwritten(doc, range); } catch (COMException) { }
@@ -2477,7 +2567,13 @@ static class Program
             if (kind == "word" && Cramped)
             {
                 int roomy = Roomy(doc);
-                if (roomy > 0) done.Add("(" + roomy + " paragraph(s) with formulas: exact line height turned into a minimum of the same height, so tall formulas are not cut off)");
+                if (roomy > 0) done.Add("(" + roomy + " paragraph(s) with formulas or pictures: exact line height turned into a minimum of the same height, so nothing tall is cut off)");
+            }
+            if (kind == "word" && Listed)
+            {
+                Listed = false;
+                string uncited = Uncited(doc);
+                if (uncited.Length > 0) done.Add(uncited);
             }
             if (undo != null) { try { undo.EndCustomRecord(); } catch (COMException) { } }
         }
