@@ -82,6 +82,7 @@ describe('office tools', () => {
     expect(again.text).not.toContain('insert_paragraphs {')
     const help = await run('office_help', { app: 'ppt' })
     expect(help.text).toContain('add_smartart {')
+    expect(help.text).toContain('slide {kind')
     expect(help.text).toContain('#RRGGBB')
   })
 

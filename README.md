@@ -28,6 +28,7 @@
 | 三线表与表格格式 | `insert_table` 的 `borders` 可选 `grid`（全框线）、`three-line`（论文三线表：上下粗线、表头下细线）、`none`；`format_table` 修改已有表格的框线、字号、行高、是否保持在同一页 |
 | 图片尺寸 | `set_image` 调整已有图片的宽高（磅或 `"12cm"`）；插图所在段落不受固定行距裁切 |
 | 图表与正文连续写 | `insert_paragraphs` 的条目里可以直接放图片或表格，按顺序落在前后段落之间，不必再数段落号 |
+| 成型版式的幻灯片 | PowerPoint 里 AI 不再自己摆文本框：先选一套主题（ink、paper、ocean、forest、graphite 五套浅色，night、chalk、plum 三套深色，可改单个颜色和字体），再用一条 `slide` 指令生成一整页——封面、目录、章节页、要点、卡片、数据、图表（柱状、条形、折线，由形状绘制）、表格、公式卡片、时间线、流程、对比、满版配图、引言、结束页。版面、配色、字号、页码、切换和入场动画由插件按主题排好；标题里的 `**词**` 以强调色加粗，`$...$` 是公式，卡片可带线性图标。整份演示文稿通常一两次调用完成 |
 | 幻灯片图示与表格 | PowerPoint 里可以直接生成原生 SmartArt（流程、循环、层次结构、组织结构图、棱锥、维恩图等 20 种常用版式，条目可带下级）、原生表格、常用形状和连线，正文可写多级要点 |
 | 操作说明按需提供 | 每次请求只带一段简短说明；某个应用的全部操作清单在 AI 第一次打开或读取该应用的文档时随结果给出一次，之后可用 `office_help` 再取。用不到的应用不占上下文 |
 | 表格跨页 | 表头行在下一页重复，单行不被拆到两页，表题不会单独留在页尾 |
@@ -80,7 +81,7 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 
 - Word：`insert_paragraphs`、`set_text`、`replace_text`、`format_text`、`delete_range`、`insert_table`、`set_cell`、`insert_image`、`set_image`、`format_table`、`insert_references`、`style_format`、`page_setup`、`page_numbers`、`header`、`page_break`、`insert_toc`、`update_fields`
 - Excel：`write_range`（值或公式）、`format_range`、`autofit`、`insert_rows`、`delete_rows`、`add_sheet`、`rename_sheet`、`delete_sheet`、`add_chart`
-- PowerPoint：`add_slide`、`set_text`、`format_text`、`add_textbox`、`add_image`、`add_smartart`、`add_table`、`add_shape`、`set_shape`、`delete_shape`、`delete_slide`、`move_slide`、`duplicate_slide`、`set_layout`、`set_background`、`set_notes`
+- PowerPoint：`theme`、`slide`、`add_slide`、`set_text`、`format_text`、`add_textbox`、`add_image`、`add_smartart`、`add_table`、`add_shape`、`set_shape`、`delete_shape`、`delete_slide`、`move_slide`、`duplicate_slide`、`set_layout`、`set_background`、`set_notes`
 
 ## 设置
 

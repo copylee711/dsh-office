@@ -13,7 +13,7 @@ export interface AppStatus { app: AppKind; installed: boolean; running: boolean;
 export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string; open?: boolean; inTable?: boolean }
 export interface WordRead { paragraphs: number; tables: number; pages?: number; from?: number; items?: WordItem[]; more?: string; table?: number; cells?: Array<Array<string | null>> }
 export interface ExcelRead { sheets: Array<{ name: string; used: string; charts?: number }>; sheet: string; range: string; values: unknown[][]; formulas?: Array<{ cell: string; formula: string }>; clipped?: string }
-export interface PptRead { slides: number; width: number; height: number; items: Array<{ slide: number; layout?: string; shapes: Array<{ name: string; type: string; box: number[]; text?: string }> }> }
+export interface PptRead { slides: number; width: number; height: number; items: Array<{ slide: number; layout?: string; plain?: number; shapes: Array<{ name: string; id?: number; type: string; box: number[]; text?: string }> }> }
 export interface EditResult { done: string[]; total: number; failed?: { index: number; op: string; error: string; code: string } }
 
 const state = (doc: DocInfo): string => [doc.saved ? 'saved' : 'unsaved changes', doc.readOnly ? 'read-only' : '', doc.active ? 'active' : ''].filter(Boolean).join(', ')
@@ -71,8 +71,9 @@ export function formatPpt(read: PptRead): string {
     lines.push(`Slide ${slide.slide}${slide.layout ? ` (${slide.layout})` : ''}`)
     if (slide.shapes.length === 0) lines.push('  (empty)')
     for (const shape of slide.shapes) {
-      lines.push(`  "${shape.name}" ${shape.type} [${shape.box.join(', ')}]${shape.text === undefined ? '' : `: ${shape.text.replace(/\n/g, ' / ')}`}`)
+      lines.push(`  "${shape.name}"${shape.id === undefined ? '' : ` #${shape.id}`} ${shape.type} [${shape.box.join(', ')}]${shape.text === undefined ? '' : `: ${shape.text.replace(/\n/g, ' / ')}`}`)
     }
+    if (slide.plain) lines.push(`  (+ ${slide.plain} shape(s) without text: decoration; full: true lists them)`)
   }
   return lines.join('\n')
 }
