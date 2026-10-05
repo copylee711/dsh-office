@@ -1255,13 +1255,31 @@ static class Program
             string align = op.Need("align");
             range.ParagraphFormat.Alignment = align == "center" ? 1 : align == "right" ? 2 : align == "justify" ? 3 : 0;
         }
-        if (op.Has("firstLineIndent")) range.ParagraphFormat.FirstLineIndent = (float)op.Num("firstLineIndent", 0);
+        if (op.Has("firstLineIndent")) Indent(range.ParagraphFormat, op.Raw("firstLineIndent"));
         if (op.Has("spaceBefore")) range.ParagraphFormat.SpaceBefore = (float)op.Num("spaceBefore", 0);
         if (op.Has("spaceAfter")) range.ParagraphFormat.SpaceAfter = (float)op.Num("spaceAfter", 0);
         if (op.Has("lineSpacing")) LineSpacing(range.ParagraphFormat, op.Raw("lineSpacing"));
         if (op.Has("indentChars")) { range.ParagraphFormat.FirstLineIndent = 0; range.ParagraphFormat.CharacterUnitFirstLineIndent = (float)op.Num("indentChars", 2); }
         if (op.Has("superscript")) range.Font.Superscript = op.Flag("superscript", false) ? 1 : 0;
         if (op.Has("subscript")) range.Font.Subscript = op.Flag("subscript", false) ? 1 : 0;
+    }
+
+    /// First-line indent as people state it: a small plain number is characters (2 = 首行缩进 2 字符; nobody means an
+    /// indent of 2 points), "2字符" / "2 chars" too; "0.74cm" and "24pt" are lengths, and a larger plain number is points.
+    static void Indent(dynamic format, object raw)
+    {
+        string text = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture).Trim();
+        System.Text.RegularExpressions.Match number = System.Text.RegularExpressions.Regex.Match(text, @"\d+(\.\d+)?");
+        if (!number.Success) throw new Fail("BAD_ARGS", "firstLineIndent \"" + text + "\" is not understood: give characters (2), or a length (\"0.74cm\", \"24pt\").");
+        float value = float.Parse(number.Value, System.Globalization.CultureInfo.InvariantCulture);
+        string lower = text.ToLowerInvariant();
+        bool cm = lower.Contains("cm") || text.Contains("厘米"), pt = lower.Contains("pt") || text.Contains("磅");
+        bool chars = !cm && !pt && (lower.Contains("char") || text.Contains("字") || value <= 4);
+        format.CharacterUnitFirstLineIndent = 0;
+        format.FirstLineIndent = 0;
+        if (value == 0) return;
+        if (chars) format.CharacterUnitFirstLineIndent = value;
+        else format.FirstLineIndent = cm ? value * 28.35f : value;
     }
 
     /// Line spacing as people state it: a plain number is a multiple of single spacing (1.5), a length is an exact
@@ -1723,11 +1741,83 @@ static class Program
         }
     }
 
+    static readonly System.Text.RegularExpressions.Regex Typed = new System.Text.RegularExpressions.Regex(@"^\[[1-9]\d{0,2}([,，\-–][1-9]\d{0,2})*\]$");
+
+    /// Citations typed by hand in a range: "[2]" or "[1,3]" in running text is rewritten as \cite{..}, and "[2] ..."
+    /// opening a paragraph is an entry of a hand-made reference list, whose number gets the bookmark citations jump to.
+    static void Handwritten(dynamic doc, dynamic range)
+    {
+        bool listed = false;
+        int from = (int)range.Start;
+        for (int guard = 0; guard < 300; guard++)
+        {
+            int end = (int)range.End;
+            if (from >= end) break;
+            dynamic hit = doc.Range(from, end);
+            if (!(bool)hit.Find.Execute(FindText: "\\[[0-9,，–\\-]@\\]", MatchWildcards: true, Forward: true, Wrap: 0)) break;
+            if ((int)hit.End > end || (int)hit.Start < from) break;
+            from = (int)hit.End;
+            string found = (string)hit.Text;
+            if (found == null || !Typed.IsMatch(found)) continue;
+            try { if ((int)hit.Font.Superscript != 0 || (int)hit.Fields.Count > 0) continue; } catch (Exception) { continue; }
+            dynamic paragraph = hit.Paragraphs[1].Range;
+            int head = (int)paragraph.Start;
+            if ((int)hit.Start == head)
+            {
+                string number = found.Substring(1, found.Length - 2);
+                int n;
+                if (!int.TryParse(number, out n) || (int)paragraph.End - (int)hit.End < 4) continue;
+                string mark = "cite_" + n;
+                if ((bool)doc.Bookmarks.Exists(mark)) doc.Bookmarks[mark].Delete();
+                doc.Bookmarks.Add(mark, doc.Range(head + 1, head + 1 + number.Length));
+                listed = true;
+                continue;
+            }
+            // Inside a formula still written between dollar signs ($[1,2]$ is an interval) it is not a citation.
+            string before = (string)doc.Range(head, hit.Start).Text ?? "";
+            int dollars = 0;
+            foreach (char ch in before) if (ch == '$') dollars++;
+            if (dollars % 2 == 1) continue;
+            string rewritten = "\\cite{" + found.Substring(1, found.Length - 2).Replace("，", ",").Replace("–", "-") + "}";
+            hit.Text = rewritten;
+            from = (int)hit.Start + rewritten.Length;
+        }
+        if (listed) Relink(doc);
+    }
+
+    /// Citations written before their reference existed are links; once the targets exist, make them cross-references.
+    static int Relink(dynamic doc)
+    {
+        int linked = 0;
+        for (int i = (int)doc.Hyperlinks.Count; i >= 1; i--)
+        {
+            dynamic link = doc.Hyperlinks[i];
+            string target = "";
+            try { target = (string)link.SubAddress; } catch (Exception) { }
+            if (target == null || !target.StartsWith("cite_", StringComparison.Ordinal) || !(bool)doc.Bookmarks.Exists(target)) continue;
+            dynamic spot = link.Range;
+            int at = (int)spot.Start;
+            link.Delete();
+            dynamic text = doc.Range(at, at + target.Length - 5);
+            text.Text = "";
+            dynamic field = doc.Fields.Add(doc.Range(at, at), -1, "REF " + target + " \\h \\* MERGEFORMAT", false);
+            field.Result.Font.Superscript = 1;
+            linked++;
+        }
+        return linked;
+    }
+
     /// \cite{1}, \cite{2,5}, \cite{3-6} in a range become superscript [1], [2,5], [3-6] whose numbers jump to the references.
     static int Cite(dynamic doc, dynamic range)
     {
         string text = (string)range.Text;
-        if (text == null || text.IndexOf("\\cite", StringComparison.Ordinal) < 0) return 0;
+        if (text == null) return 0;
+        if (text.IndexOf('[') >= 0)
+        {
+            try { Handwritten(doc, range); } catch (COMException) { }
+            text = (string)range.Text ?? "";
+        }
+        if (text.IndexOf("\\cite", StringComparison.Ordinal) < 0) return 0;
         int made = 0;
         System.Text.RegularExpressions.MatchCollection found = Cites.Matches(text);
         for (int k = found.Count - 1; k >= 0; k--)
@@ -1802,23 +1892,7 @@ static class Program
             doc.Bookmarks.Add(mark, doc.Range(start + 1, start + 1 + number.ToString().Length));
             current = p;
         }
-        // Citations written before the list existed are links; now that their targets exist, make them cross-references.
-        int linked = 0;
-        for (int i = (int)doc.Hyperlinks.Count; i >= 1; i--)
-        {
-            dynamic link = doc.Hyperlinks[i];
-            string target = "";
-            try { target = (string)link.SubAddress; } catch (Exception) { }
-            if (target == null || !target.StartsWith("cite_", StringComparison.Ordinal) || !(bool)doc.Bookmarks.Exists(target)) continue;
-            dynamic spot = link.Range;
-            int at = (int)spot.Start;
-            link.Delete();
-            dynamic text = doc.Range(at, at + target.Length - 5);
-            text.Text = "";
-            dynamic field = doc.Fields.Add(doc.Range(at, at), -1, "REF " + target + " \\h \\* MERGEFORMAT", false);
-            field.Result.Font.Superscript = 1;
-            linked++;
-        }
+        int linked = Relink(doc);
         return items.Count + " reference(s) listed" + (linked > 0 ? ", " + linked + " citation(s) in the text now cross-reference them" : "");
     }
 
@@ -1848,7 +1922,7 @@ static class Program
         if (op.Has("color")) font.Color = Bgr(op.Need("color"));
         if (op.Has("align")) { string align = op.Need("align"); format.Alignment = align == "center" ? 1 : align == "right" ? 2 : align == "justify" ? 3 : 0; }
         if (op.Has("indentChars")) { format.FirstLineIndent = 0; format.CharacterUnitFirstLineIndent = (float)op.Num("indentChars", 2); }
-        if (op.Has("firstLineIndent")) { format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = (float)op.Num("firstLineIndent", 0); }
+        if (op.Has("firstLineIndent")) Indent(format, op.Raw("firstLineIndent"));
         if (op.Has("spaceBefore")) format.SpaceBefore = (float)op.Num("spaceBefore", 0);
         if (op.Has("spaceAfter")) format.SpaceAfter = (float)op.Num("spaceAfter", 0);
         if (op.Has("lineSpacing")) LineSpacing(format, op.Raw("lineSpacing"));
