@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { HelperLike } from '../src/helper-client.js'
 import { formatOpened, formatStatus } from '../src/format.js'
+import { formulasOf, latexToOmml } from '../src/omml.js'
 import { DEFAULTS, resolveConfig } from '../src/settings.js'
 import { appOf, createTools } from '../src/tools.js'
 
@@ -37,7 +38,8 @@ describe('the office suite', () => {
   it('names the WPS apps and says what is missing there', () => {
     const doc = { app: 'word' as const, suite: 'wps', name: 'a.docx', path: 'C:\\a.docx', saved: true, active: true, how: 'opened' as const }
     expect(formatOpened(doc)).toContain('WPS Writer')
-    expect(formatOpened(doc)).toContain('formulas')
+    expect(formatOpened(doc)).not.toContain('formulas')
+    expect(formatOpened({ ...doc, app: 'ppt' })).toContain('formulas')
     expect(formatOpened({ ...doc, suite: undefined })).not.toContain('WPS')
     const status = formatStatus([
       { app: 'word', suite: 'office', installed: false, running: false, documents: [] },
@@ -45,6 +47,32 @@ describe('the office suite', () => {
     ])
     expect(status).toContain('Word: not installed')
     expect(status).toContain('WPS Spreadsheets:')
+  })
+})
+
+describe('formulas for WPS', () => {
+  it('writes LaTeX as OMML: fractions, scripts, roots, sums with what they apply to', () => {
+    expect(latexToOmml('\\frac{a}{b}', false)).toMatch(/^<m:oMath><m:f><m:num>.*a.*<\/m:num><m:den>.*b.*<\/m:den><\/m:f><\/m:oMath>$/)
+    expect(latexToOmml('x^2_i', false)).toContain('<m:sSubSup>')
+    expect(latexToOmml('\\sqrt[3]{x}', false)).toMatch(/<m:rad><m:deg>.*3.*<\/m:deg>/)
+    const sum = latexToOmml('\\sum_{i=1}^{n} x_i = 1', true)!
+    expect(sum).toContain('<m:chr m:val="∑"/><m:limLoc m:val="undOvr"/>')
+    expect(sum).toMatch(/<m:e><m:sSub>.*<\/m:sSub><\/m:e><\/m:nary><m:r>/)
+    expect(latexToOmml('\\sum_{i=1}^{n} x_i', false)).toContain('<m:limLoc m:val="subSup"/>')
+    expect(latexToOmml('\\hat y + \\bar x', false)).toMatch(/<m:acc>.*<m:bar>/)
+  })
+
+  it('writes brackets, matrices and cases', () => {
+    expect(latexToOmml('\\left(\\frac{a}{b}\\right)', false)).toContain('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>')
+    expect(latexToOmml('\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}', false)!.match(/<m:mr>/g)).toHaveLength(2)
+    expect(latexToOmml('f=\\begin{cases}1,&x>0\\\\0,&x\\le 0\\end{cases}', true)).toContain('<m:begChr m:val="{"/><m:endChr m:val=""/>')
+    expect(latexToOmml('a < b \\& c', false)).toContain('&lt;')
+  })
+
+  it('gives nothing for what cannot be read, and collects the formulas of a batch once each', () => {
+    expect(latexToOmml('\\frac{a}{', false)).toBeUndefined()
+    const found = formulasOf([{ op: 'insert_paragraphs', items: ['inline $x^2$ and $x^2$ again', { text: '$$E = mc^2 \\tag{1}$$' }, 'no formula, price $5'] }])
+    expect(Object.keys(found).sort()).toEqual(['d:E = mc^2', 'i:x^2'])
   })
 })
 

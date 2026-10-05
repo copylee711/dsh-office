@@ -12,6 +12,7 @@ const { extname, isAbsolute } = win32
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { APP_NAMES, formatEdit, formatExcel, formatOpened, formatPpt, formatStatus, formatWord, type AppKind, type AppStatus, type DocInfo, type EditResult, type ExcelRead, type PptRead, type WordRead } from './format.js'
+import { formulasOf } from './omml.js'
 import type { HelperLike } from './helper-client.js'
 import type { Settings } from './settings.js'
 
@@ -385,7 +386,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       if (input.ops.length > 200) throw new Error('At most 200 operations per call.')
       const { follow, typing, card, silent } = host.settings()
       const on = target(input)
-      const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card: silent ? false : card, silent }, 4.5 * 60_000)
+      // WPS does not build equations itself: the formulas of the batch go along converted, for the helper to put in there.
+      const math = formulasOf(input.ops)
+      const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card: silent ? false : card, silent, ...(Object.keys(math).length > 0 ? { math } : {}) }, 4.5 * 60_000)
       if (result.done.length > 0) unseen.add(keyOf(on))
       // A conversation that edits without having opened or read (the document was open already) gets the list here.
       return { text: formatEdit(result) + guide(exec, on.app) }

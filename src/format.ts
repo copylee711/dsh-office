@@ -37,7 +37,7 @@ export function formatStatus(apps: AppStatus[]): string {
 
 export function formatOpened(doc: DocInfo): string {
   const how = doc.how === 'created' ? 'Created' : doc.how === 'opened' ? 'Opened' : 'Already open, attached to'
-  return `${how} ${doc.path ?? doc.name} in ${appName(doc)} (${state(doc)}).${doc.suite === 'wps' ? ' This is WPS Office: the same tools and operations apply, except that formulas ($...$) are not built into equations there yet — they stay as text; say so to the user if the document has formulas.' : ''}${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
+  return `${how} ${doc.path ?? doc.name} in ${appName(doc)} (${state(doc)}).${doc.suite === 'wps' ? ` This is WPS Office: the same tools and operations apply${doc.app === 'ppt' ? ',' : ''}${doc.app === 'ppt' ? ' except that formulas ($...$) on slides are not built into equations there yet — they stay as text; say so to the user if the deck has formulas' : ''}.` : ''}${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
 }
 
 const BODY_STYLES = new Set(['normal', '正文', 'body text'])

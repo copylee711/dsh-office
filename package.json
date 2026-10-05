@@ -1,6 +1,6 @@
 {
   "name": "@copylee/dsh-office",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "DeepSeek Harness Office 插件（Windows）：AI 直接在你打开的 Word / Excel / PowerPoint 里改文档，改动实时出现在窗口中，你可以同时编辑；读结构、批量编辑、渲染成图核对、保存。",
   "type": "module",
   "author": "copylee",
@@ -111,6 +111,7 @@
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.31",
     "react": "^18.3.1",
+    "temml": "0.13.5",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
