@@ -4184,6 +4184,14 @@ static class Program
         }
         if (nested) text = string.Join("\r", lines);
         PptWriteText(textRange, text);
+        // Written piece by piece, the range in hand may no longer span what was written: take the frame's text anew.
+        try
+        {
+            string now = (string)textRange.Text ?? "";
+            Trace("written " + text.Length + " chars, the range holds " + now.Length);
+            if (now.Length < text.Length) textRange = textRange.Parent.TextRange;
+        }
+        catch (Exception) { }
         if (nested)
         {
             for (int i = 0; i < lines.Length; i++)
@@ -4446,6 +4454,7 @@ static class Program
         if (text == null || text.IndexOf('$') < 0) return 0;
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
         if (found.Count == 0) return 0;
+        Trace("text of " + text.Length + " chars with " + found.Count + " formula(s): " + Clip(text, 60));
         if (!MathSource()) { PptMathFailed += found.Count; return 0; }
         SaveClipboard();
         int made = 0;
@@ -4473,19 +4482,32 @@ static class Program
                     {
                         int ink = 0; float size = 0;
                         try { ink = (int)spot.Font.Color.RGB; size = (float)spot.Font.Size; } catch (Exception) { }
-                        int before = ((string)textRange.Text ?? "").Length;
+                        string was = (string)textRange.Text ?? "";
+                        int before = was.Length;
                         equation.Copy();
                         spot.Paste();
+                        // PowerPoint at times reports a paste that put nothing in (the clipboard was not ready yet):
+                        // the text is then exactly as before, dollar signs and all. That is no paste; wait and go again.
+                        if (((string)textRange.Text ?? "") == was)
+                        {
+                            Thread.Sleep(80 + 80 * attempt);
+                            spot = textRange.Characters(m.Index + 1, m.Length);
+                            continue;
+                        }
                         pasted = true;
                         ClipOurs = GetClipboardSequenceNumber();
                         // The equation arrives in Word's black: it takes the colour and size of the text around it.
                         // What was pasted is what now stands where the source stood, as long as the text grew or shrank by.
                         try
                         {
-                            int length = ((string)textRange.Text ?? "").Length - (before - m.Length);
+                            string now = (string)textRange.Text ?? "";
+                            int length = now.Length - (before - m.Length), start = m.Index + 1;
+                            // PowerPoint may take the space before the formula away as it pastes: the equation then
+                            // begins one place earlier, and its first letter would be left in Word's black.
+                            if (m.Index > 0 && was[m.Index - 1] == ' ' && (now.Length < m.Index || now[m.Index - 1] != ' ')) { start = m.Index; length += 1; }
                             if (length > 0)
                             {
-                                dynamic placed = textRange.Characters(m.Index + 1, length);
+                                dynamic placed = textRange.Characters(start, length);
                                 placed.Font.Color.RGB = ink;
                                 if (size > 1) placed.Font.Size = size;
                             }
@@ -4495,8 +4517,9 @@ static class Program
                     catch (COMException) { Thread.Sleep(60 + 60 * attempt); }
                 }
                 if (pasted) made++; else PptMathFailed++;
+                Trace("formula " + k + " \"" + source + "\" pasted " + pasted + "; text now " + ((string)textRange.Text ?? "").Length);
             }
-            catch (Exception) { PptMathFailed++; }
+            catch (Exception error) { PptMathFailed++; Trace("formula " + k + " failed: " + error.GetType().Name + " " + error.Message); }
         }
         RestoreClipboard();
         return made;
@@ -5030,7 +5053,7 @@ static class Program
             try { dynamic part = range.Characters(span[0] + 1, span[1]); part.Font.Bold = -1; if (emphasis != null) part.Font.Color.RGB = Bgr(emphasis); }
             catch (Exception) { }
         }
-        if (plain.ToString().IndexOf('$') >= 0) { try { PptMath(range); } catch (Exception) { } }
+        if (plain.ToString().IndexOf('$') >= 0) { try { PptMath(range); } catch (Exception error) { PptMathFailed++; Trace("formulas of a label: " + error.GetType().Name + " " + error.Message); } }
         p.Texts++;
         return Track(p, box);
     }
@@ -5384,7 +5407,15 @@ static class Program
         if (kind == "cover" || kind == "closing")
         {
             bool cover = kind == "cover";
-            if (image != null && IsFigure(image)) Figure(p, 500, 70, 412, 400, image);
+            bool full = image != null && !IsFigure(image) && op.Str("style", "") == "full";
+            string titleInk = full ? "#FFFFFF" : t.Primary, bodyInk = full ? "#FFFFFF" : t.Text, softInk = full ? "#E6E6E6" : t.Muted;
+            if (full)
+            {
+                // The picture is the slide; a dark veil, heavier at the left where the words stand, lets them read.
+                Photo(p, 0, 0, 960, 540, image);
+                Veil(p, 0, 0, 960, 540, "#000000", 1, 0.62, 0.05);
+            }
+            else if (image != null && IsFigure(image)) Figure(p, 500, 70, 412, 400, image);
             else if (image != null)
             {
                 Photo(p, 440, 0, 520, 540, image);
@@ -5400,15 +5431,15 @@ static class Program
             }
             string kicker = op.Str("kicker", null);
             Block(p, 56, cover ? 132 : 190, 64, 4, t.Accent, false);
-            if (!string.IsNullOrEmpty(kicker)) Label(p, 56, cover ? 104 : 162, 420, 18, kicker, 12, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Kicker";
+            if (!string.IsNullOrEmpty(kicker)) Label(p, 56, cover ? 104 : 162, 420, 18, kicker, 12, softInk, false, t.BodyFont, 1, 1, null).Name = "Kicker";
             string title = op.Str("title", "");
             Unit(p);
-            dynamic head = Label(p, 56, cover ? 152 : 210, image != null ? 400 : 560, 130, title, title.Length > 18 ? 30 : title.Length > 9 ? 36 : 44, t.Primary, true, t.TitleFont, 1, 1, t.Accent);
+            dynamic head = Label(p, 56, cover ? 152 : 210, image != null && !full ? 400 : 560, 130, title, title.Length > 18 ? 30 : title.Length > 9 ? 36 : 44, titleInk, true, t.TitleFont, 1, 1, full ? null : t.Accent);
             head.Name = "Title";
             p.Motion.Add(head);
             string subtitle = op.Str("subtitle", null);
             Unit(p);
-            if (!string.IsNullOrEmpty(subtitle)) { dynamic sub = Label(p, 56, cover ? 290 : 350, image != null ? 372 : 560, 70, subtitle, 15, t.Text, false, t.BodyFont, 1, 1, t.Accent); sub.Name = "Subtitle"; p.Motion.Add(sub); }
+            if (!string.IsNullOrEmpty(subtitle)) { dynamic sub = Label(p, 56, cover ? 290 : 350, image != null && !full ? 372 : 560, 70, subtitle, 15, bodyInk, false, t.BodyFont, 1, 1, full ? null : t.Accent); sub.Name = "Subtitle"; p.Motion.Add(sub); }
             Dictionary<string, object> figure = op.Raw("stat") as Dictionary<string, object>;
             if (figure != null)
             {
@@ -5419,7 +5450,7 @@ static class Program
                 p.Motion.Add(big);
             }
             string meta = op.Str("meta", null);
-            if (!string.IsNullOrEmpty(meta)) { Rule(p, 56, 446, 300, 446, t.Line, 0.75); Label(p, 56, 456, 420, 56, meta, 11.5, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Meta"; }
+            if (!string.IsNullOrEmpty(meta)) { Rule(p, 56, 446, 300, 446, full ? "#FFFFFF" : t.Line, 0.75); Label(p, 56, 456, 420, 56, meta, 11.5, softInk, false, t.BodyFont, 1, 1, null).Name = "Meta"; }
         }
         else if (kind == "section")
         {
@@ -5472,6 +5503,38 @@ static class Program
             string kicker = op.Str("kicker", null);
             if (!string.IsNullOrEmpty(kicker)) Label(p, 56, 40, 600, 16, kicker, 10.5, "#FFFFFF", false, t.BodyFont, 1, 1, null).Name = "Kicker";
         }
+        else if (kind == "split")
+        {
+            bool right = op.Str("side", "right") != "left";
+            double ix = right ? 480 : 0, tx = right ? 56 : 536, tw = 368;
+            if (image != null && IsFigure(image)) { Block(p, ix, 0, 480, 540, "#FFFFFF", false); Figure(p, ix + 20, 50, 440, 440, image); }
+            else if (image != null) Photo(p, ix, 0, 480, 540, image);
+            else Block(p, ix, 0, 480, 540, t.Dark ? t.Surface : t.Primary, false);
+            string kicker = op.Str("kicker", null);
+            if (!string.IsNullOrEmpty(kicker)) Label(p, tx, 76, tw, 18, kicker, 11, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Kicker";
+            Block(p, tx, 104, 56, 4, t.Accent, false);
+            string title = op.Str("title", "");
+            Unit(p);
+            dynamic head = Label(p, tx, 120, tw, 112, title, title.Length > 14 ? 26 : 32, t.Primary, true, t.TitleFont, 1, 1, t.Accent);
+            head.Name = "Title";
+            p.Motion.Add(head);
+            double by = title.Length > 22 ? 256 : 222;
+            string words = op.Str("text", op.Str("subtitle", null));
+            if (!string.IsNullOrEmpty(words)) { Unit(p); dynamic body = Label(p, tx, by, tw, 96, words, 13, t.Text, false, t.BodyFont, 1, 1, t.Accent); body.Name = "Text"; p.Motion.Add(body); by += 104; }
+            IList points = Items(op, "points", "items");
+            int count = Math.Min(points.Count, 4);
+            double row = count == 0 ? 0 : Math.Min(60, (500 - by) / count);
+            for (int i = 0; i < count; i++)
+            {
+                Unit(p);
+                string step = Field(points[i], "head"), text = Field(points[i], "text") ?? "";
+                Block(p, tx, by + 9, 6, 6, Pick(p, i), false);
+                p.Motion.Add(Words(p, tx + 18, by, tw - 18, row - 6, (step != null ? "**" + step + "**　" : "") + text, 12.5, t.Text, false));
+                by += row;
+            }
+            string note = op.Str("note", op.Str("caption", null));
+            if (!string.IsNullOrEmpty(note)) Label(p, tx, 508, tw, 14, note, 8.5, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Note";
+        }
         else if (kind == "quote")
         {
             if (image != null) { Photo(p, 0, 0, 960, 540, image); Veil(p, 0, 0, 960, 540, t.Bg, 1, 0.9, 0.8); }
@@ -5488,7 +5551,7 @@ static class Program
             double top = Head(p, op), bottom = BodyBottom, left = 48, width = 864;
             p.Current = null;
             // A picture beside the content: the right third of the body.
-            if (image != null && kind != "chart")
+            if (image != null && kind != "chart" && kind != "canvas" && kind != "custom" && kind != "gallery" && kind != "figures")
             {
                 Unit(p);
                 bool figure = IsFigure(image), list = kind == "bullets" || kind == "agenda";
@@ -5528,7 +5591,11 @@ static class Program
             else if (kind == "timeline") Timeline(p, op, left, top, width, bottom - top);
             else if (kind == "compare") Compare(p, op, left, top, width, bottom - top);
             else if (kind == "process") Process(p, op, left, top, width, bottom - top);
-            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, timeline, compare, process, image, quote or closing.");
+            else if (kind == "theorem" || kind == "definition" || kind == "lemma") Theorem(p, op, left, top, width, bottom - top);
+            else if (kind == "gallery" || kind == "figures") Gallery(p, op, left, top, width, bottom - top);
+            else if (kind == "summary" || kind == "takeaways") Summary(p, op, left, top, width, bottom - top);
+            else if (kind == "canvas" || kind == "custom") Canvas(p, op);
+            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, theorem, gallery, summary, timeline, compare, process, split, image, quote, canvas or closing.");
         }
         if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
         Move(p);
@@ -5911,6 +5978,507 @@ static class Program
         Callout(p, op, x, y + h - 42, w);
     }
 
+    // ───────────────────────── more layouts ─────────────────────────
+
+    /// A colour by its role in the theme (primary, accent, text, muted, surface, line, bg, white) or as #RRGGBB.
+    static string Tone(Page p, string name, string fallback)
+    {
+        Theme t = p.T;
+        switch ((name ?? "").Trim().ToLowerInvariant())
+        {
+            case "": return fallback;
+            case "primary": return t.Primary;
+            case "accent": return t.Accent;
+            case "text": return t.Text;
+            case "muted": return t.Muted;
+            case "surface": return t.Surface;
+            case "line": return t.Line;
+            case "bg": case "background": return t.Bg;
+            case "white": return "#FFFFFF";
+            case "black": return "#000000";
+        }
+        return name.StartsWith("#", StringComparison.Ordinal) ? name : fallback;
+    }
+
+    /// Two colours mixed: share 0 gives the first, 1 the second.
+    static string Mix(string a, string b, double share)
+    {
+        Color ca = ColorTranslator.FromHtml(a), cb = ColorTranslator.FromHtml(b);
+        return "#" + ((int)Math.Round(ca.R + (cb.R - ca.R) * share)).ToString("X2") + ((int)Math.Round(ca.G + (cb.G - ca.G) * share)).ToString("X2") + ((int)Math.Round(ca.B + (cb.B - ca.B) * share)).ToString("X2");
+    }
+
+    /// The colours a chart of many parts goes through: the theme's two, then lighter steps of them.
+    static string[] Palette(Page p)
+    {
+        Theme t = p.T;
+        return new string[] { t.Primary, t.Accent, Mix(t.Primary, t.Bg, 0.45), Mix(t.Accent, t.Bg, 0.45), t.Muted, Mix(t.Primary, t.Bg, 0.7), Mix(t.Accent, t.Bg, 0.7), t.Line };
+    }
+
+    /// A definition, theorem or lemma: the statement set apart on a card, what leads to it listed underneath.
+    static void Theorem(Page p, Bag op, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        string label = op.Str("label", null), name = op.Str("name", null), statement = op.Str("statement", op.Str("text", ""));
+        IList proof = Items(op, "proof", "steps", "points");
+        bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        double usable = h - (callout ? 54 : 0);
+        bool tall = System.Text.RegularExpressions.Regex.IsMatch(statement, @"\\(d|t)?frac|\\sum|\\int|\\prod|\\begin");
+        double head = label != null || name != null ? 36 : 0;
+        double sh = head + 34 + Math.Ceiling(statement.Length / 40.0) * 30 + (tall ? 26 : 0);
+        sh = Math.Max(96, Math.Min(sh, usable * (proof.Count > 0 ? 0.52 : 0.9)));
+        Unit(p);
+        Block(p, x, y, w, sh, t.Surface, false);
+        Block(p, x, y, 6, sh, t.Accent, false);
+        double ty = y + 16;
+        if (head > 0)
+        {
+            double cw = string.IsNullOrEmpty(label) ? 0 : label.Length * 15 + 26;
+            if (cw > 0)
+            {
+                Block(p, x + 26, ty, cw, 24, t.Accent, true);
+                Label(p, x + 26, ty, cw, 24, label, 10.5, "#FFFFFF", true, t.BodyFont, 2, 3, null).Name = "Label";
+            }
+            if (!string.IsNullOrEmpty(name)) Label(p, x + 26 + (cw > 0 ? cw + 12 : 0), ty, w - 64 - cw, 24, name, 12.5, t.Primary, true, t.BodyFont, 1, 3, null).Name = "Name";
+            ty += 34;
+        }
+        dynamic said = Label(p, x + 26, ty, w - 52, y + sh - ty - 12, statement, 15.5, t.Text, false, t.TitleFont, 1, 3, t.Accent);
+        said.Name = "Statement";
+        p.Motion.Add(said);
+        double py = y + sh + 16;
+        int n = Math.Min(proof.Count, 5);
+        if (n > 0)
+        {
+            Label(p, x, py, 300, 18, op.Str("proofTitle", "证明思路"), 10.5, t.Muted, true, t.BodyFont, 1, 1, null);
+            py += 26;
+            double row = Math.Min(60, (y + usable - py) / n);
+            for (int i = 0; i < n; i++)
+            {
+                Unit(p);
+                object raw = proof[i];
+                string step = Field(raw, "head"), text = Field(raw, "text") ?? "";
+                Dot(p, x + 13, py + 13, 13, Pick(p, i));
+                Label(p, x, py, 26, 26, (i + 1).ToString(), 10.5, "#FFFFFF", true, t.BodyFont, 2, 3, null);
+                p.Motion.Add(Words(p, x + 40, py + 1, w - 40, row - 6, (step != null ? "**" + step + "**　" : "") + text, 13.5, t.Text, false));
+                py += row;
+            }
+        }
+        Callout(p, op, x, y + h - 42, w);
+    }
+
+    /// Two to six pictures side by side, each with its caption: results to compare, the panels of an experiment.
+    static void Gallery(Page p, Bag op, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        IList images = Items(op, "images", "figures", "items");
+        if (images.Count == 0) throw new Fail("BAD_ARGS", "A gallery slide needs \"images\": [{image, caption?}, ..].");
+        int n = Math.Min(images.Count, 6);
+        string text = op.Str("text", null);
+        bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        double foot = (string.IsNullOrEmpty(text) ? 0 : 46) + (callout ? 54 : 0);
+        int perRow = n <= 3 ? n : n == 4 ? 2 : 3, rows = (n + perRow - 1) / perRow;
+        double gap = 16, cw = (w - gap * (perRow - 1)) / perRow, ch = (h - foot - gap * (rows - 1)) / rows;
+        for (int i = 0; i < n; i++)
+        {
+            Unit(p);
+            object raw = images[i];
+            string path = Field(raw, "image") ?? Field(raw, "path") ?? Field(raw, "text"), caption = Field(raw, "caption") ?? Field(raw, "head");
+            if (string.IsNullOrEmpty(path)) throw new Fail("BAD_ARGS", "Picture " + (i + 1) + " of the gallery has no \"image\".");
+            double cx = x + (i % perRow) * (cw + gap), cy = y + (i / perRow) * (ch + gap), under = caption != null ? 22 : 0;
+            p.Motion.Add(IsFigure(path) ? Figure(p, cx, cy, cw, ch - under, path) : Photo(p, cx, cy, cw, ch - under, path));
+            if (caption != null) Label(p, cx, cy + ch - under + 4, cw, 16, caption, 9.5, t.Muted, false, t.BodyFont, 2, 1, t.Accent).Name = "Caption " + (i + 1);
+        }
+        if (!string.IsNullOrEmpty(text)) { Unit(p); Label(p, x, y + h - foot + 6, w, 38, text, 13.5, t.Text, false, t.BodyFont, 2, 3, t.Accent).Name = "Text"; }
+        Callout(p, op, x, y + h - 42, w);
+    }
+
+    /// The two to four things to take away, numbered large; the first stands out.
+    static void Summary(Page p, Bag op, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        IList points = Items(op, "points", "items");
+        int n = Math.Max(1, Math.Min(points.Count, 4));
+        bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        double usable = h - (callout ? 54 : 0), gap = 18, cw = (w - gap * (n - 1)) / n, ch = Math.Min(usable, 290);
+        double top = Settle(y, usable, ch);
+        for (int i = 0; i < n; i++)
+        {
+            Unit(p);
+            object raw = points[i];
+            double cx = x + i * (cw + gap);
+            bool lead = i == 0;
+            string ground = lead ? (t.Dark ? t.Accent : t.Primary) : t.Surface, ink = lead ? "#FFFFFF" : t.Text, soft = lead ? "#FFFFFF" : t.Muted, tone = lead ? "#FFFFFF" : Pick(p, i);
+            dynamic back = Block(p, cx, top, cw, ch, ground, false);
+            dynamic number = Label(p, cx + 22, top + 16, cw - 44, 62, (i + 1).ToString("00"), 40, tone, true, t.TitleFont, 1, 1, null);
+            if (lead) { try { number.TextFrame2.TextRange.Font.Fill.Transparency = 0.45f; } catch (Exception) { } }
+            Block(p, cx + 22, top + 88, 30, 3, lead ? "#FFFFFF" : tone, false);
+            string head = Field(raw, "head"), text = Field(raw, "text") ?? "";
+            double ty = top + 104;
+            if (head != null) { Label(p, cx + 22, ty, cw - 44, 52, head, 15, ink, true, t.BodyFont, 1, 1, null); ty += 58; }
+            Label(p, cx + 22, ty, cw - 44, top + ch - ty - 16, text, head != null ? 11.5 : 13.5, head != null ? soft : ink, false, t.BodyFont, 1, 1, lead ? null : t.Accent);
+            p.Motion.Add(back);
+        }
+        Callout(p, op, x, y + h - 42, w);
+    }
+
+    /// Shapes placed by the author on the 960 x 540 canvas, in the colours and type of the theme: for a layout that
+    /// none of the ready kinds gives.
+    static void Canvas(Page p, Bag op)
+    {
+        Theme t = p.T;
+        IList items = Items(op, "items", "elements");
+        if (items.Count == 0) throw new Fail("BAD_ARGS", "A canvas slide needs \"items\": [{type, box: [x, y, w, h], ..}, ..] on the 960 x 540 canvas.");
+        int index = 0;
+        foreach (object raw in items)
+        {
+            index++;
+            Bag it = new Bag(raw);
+            string type = it.Str("type", "text").ToLowerInvariant();
+            double[] b = null;
+            IList given = it.List("box");
+            if (given != null && given.Count == 4) { b = new double[4]; for (int k = 0; k < 4; k++) b[k] = Number(given[k]); }
+            if (b == null || b.Length != 4) throw new Fail("BAD_ARGS", "Item " + index + " of the canvas (" + type + ") needs \"box\": [x, y, w, h] on the 960 x 540 canvas.");
+            if (!it.Flag("with", false) || p.Current == null) Unit(p);
+            string color = it.Str("color", null), fill = it.Str("fill", null);
+            int align = it.Str("align", "left") == "center" ? 2 : it.Str("align", "left") == "right" ? 3 : 1;
+            int anchor = it.Str("valign", "top") == "middle" ? 3 : it.Str("valign", "top") == "bottom" ? 4 : 1;
+            dynamic made = null;
+            if (type == "text" || type == "title")
+            {
+                made = Label(p, b[0], b[1], b[2], b[3], Lines(it.Raw("text") ?? ""), it.Num("size", type == "title" ? 24 : 14), Tone(p, color, type == "title" ? t.Primary : t.Text), it.Flag("bold", type == "title"), type == "title" || it.Str("font", "") == "title" ? t.TitleFont : t.BodyFont, align, anchor, t.Accent);
+            }
+            else if (type == "card")
+            {
+                string tone = Tone(p, color, Pick(p, index - 1));
+                made = Block(p, b[0], b[1], b[2], b[3], Tone(p, fill, t.Surface), true);
+                Block(p, b[0] + 16, b[1], 36, 4, tone, false);
+                double ty = b[1] + 18;
+                if (Icon(p, b[0] + 18, ty, 26, it.Str("icon", null), tone) != null) ty += 36;
+                string value = it.Str("value", null), head = it.Str("head", null), text = it.Str("text", "");
+                if (value != null) { Label(p, b[0] + 18, ty, b[2] - 36, 40, value, 26, tone, true, t.TitleFont, 1, 1, null); ty += 42; }
+                if (head != null) { Label(p, b[0] + 18, ty, b[2] - 36, 26, head, it.Num("size", 14) + 1, t.Text, true, t.BodyFont, 1, 1, null); ty += 30; }
+                Label(p, b[0] + 18, ty, b[2] - 36, Math.Max(16, b[1] + b[3] - ty - 12), text, it.Num("size", 14) - 2, t.Muted, false, t.BodyFont, 1, 1, t.Accent);
+            }
+            else if (type == "panel" || type == "shape" || type == "box" || type == "circle")
+            {
+                string shape = type == "circle" ? "circle" : it.Str("shape", "rect");
+                string ground = Tone(p, fill ?? color, t.Surface);
+                if (shape == "circle") made = Dot(p, b[0] + b[2] / 2, b[1] + b[3] / 2, Math.Min(b[2], b[3]) / 2, ground);
+                else made = Block(p, b[0], b[1], b[2], b[3], ground, shape == "round" || shape == "rounded");
+                if (it.Has("transparency")) { try { made.Fill.Transparency = (float)it.Num("transparency", 0); } catch (Exception) { } }
+                if (it.Has("text"))
+                {
+                    // Words on a filled shape read in white when the ground is dark.
+                    Color g = ColorTranslator.FromHtml(ground);
+                    bool dark = g.R * 0.299 + g.G * 0.587 + g.B * 0.114 < 150;
+                    Label(p, b[0] + 8, b[1], b[2] - 16, b[3], Lines(it.Raw("text")), it.Num("size", 13), Tone(p, it.Str("ink", null), dark ? "#FFFFFF" : t.Text), it.Flag("bold", false), t.BodyFont, it.Has("align") ? align : 2, it.Has("valign") ? anchor : 3, dark ? null : t.Accent);
+                }
+            }
+            else if (type == "line" || type == "arrow")
+            {
+                made = Rule(p, b[0], b[1], b[0] + b[2], b[1] + b[3], Tone(p, color, type == "arrow" ? t.Muted : t.Line), it.Num("weight", type == "arrow" ? 1.5 : 0.75));
+                if (type == "arrow") { try { made.Line.EndArrowheadStyle = 2; } catch (Exception) { } }
+                if (it.Flag("dashed", false)) { try { made.Line.DashStyle = 4; } catch (Exception) { } }
+            }
+            else if (type == "image" || type == "figure" || type == "photo")
+            {
+                string path = it.Str("image", it.Str("path", null));
+                if (path == null) throw new Fail("BAD_ARGS", "Item " + index + " of the canvas (image) needs \"image\": a path.");
+                bool whole = type == "figure" || it.Str("fit", "") == "contain" || (type == "image" && it.Str("fit", "") != "cover" && IsFigure(path));
+                made = whole ? Figure(p, b[0], b[1], b[2], b[3], path) : Photo(p, b[0], b[1], b[2], b[3], path);
+            }
+            else if (type == "formula")
+            {
+                string tone = Tone(p, color, Pick(p, index - 1)), label = it.Str("label", null);
+                Block(p, b[0], b[1], b[2], b[3], Tone(p, fill, t.Surface), false);
+                Block(p, b[0], b[1], 4, b[3], tone, false);
+                if (label != null) Label(p, b[0] + 18, b[1] + 8, b[2] - 36, 16, label, 11, t.Muted, false, t.BodyFont, 1, 1, null);
+                string source = it.Str("latex", it.Str("text", "")).Trim().Trim('$');
+                made = Label(p, b[0] + 18, b[1] + (label != null ? 20 : 0), b[2] - 36, b[3] - (label != null ? 20 : 0), '$' + source + '$', it.Num("size", 22), t.Text, false, "Cambria Math", 2, 3, null);
+            }
+            else if (type == "stat")
+            {
+                string tone = Tone(p, color, Pick(p, index - 1)), value = it.Str("value", ""), unit = it.Str("unit", null);
+                Rule(p, b[0], b[1] + 4, b[0] + b[2], b[1] + 4, tone, 1.5);
+                Label(p, b[0], b[1] + 14, b[2], 18, it.Str("label", ""), 11.5, t.Muted, false, t.BodyFont, 1, 1, null);
+                made = Label(p, b[0], b[1] + 38, b[2], Math.Max(40, b[3] - 70), value + (unit == null ? "" : " " + unit), it.Num("size", 44), tone, true, t.TitleFont, 1, 3, null);
+                if (unit != null) { try { dynamic tail = made.TextFrame.TextRange.Characters(value.Length + 1, unit.Length + 1); tail.Font.Size = (float)(17 * p.S); tail.Font.Bold = 0; tail.Font.Color.RGB = Bgr(t.Text); } catch (Exception) { } }
+                if (it.Has("text")) Label(p, b[0], b[1] + b[3] - 30, b[2], 30, it.Need("text"), 11.5, t.Muted, false, t.BodyFont, 1, 1, null);
+            }
+            else if (type == "chart")
+            {
+                Dictionary<string, object> chart = (it.Raw("chart") as Dictionary<string, object>) ?? (raw as Dictionary<string, object>);
+                Draw(p, chart, b[0], b[1], b[2], b[3]);
+            }
+            else if (type == "icon") made = Icon(p, b[0], b[1], Math.Min(b[2], b[3]), it.Str("icon", it.Str("name", null)), Tone(p, color, t.Primary));
+            else if (type == "bullets" || type == "points") Bullets(p, it, b[0], b[1], b[2], b[3], false);
+            else throw new Fail("BAD_ARGS", "Item " + index + " of the canvas has the unknown type \"" + type + "\": use text, title, card, panel, circle, line, arrow, image, figure, formula, stat, chart, icon or bullets.");
+            if (made != null && it.Has("name")) { try { made.Name = it.Need("name"); } catch (Exception) { } }
+        }
+    }
+
+    /// A table drawn from shapes, cell by cell: unlike a table of PowerPoint's own, its cells can hold equations.
+    static void DrawnTable(Page p, IList data, int rows, int cols, double x, double y, double w, double rowHeight, double size)
+    {
+        Theme t = p.T;
+        // The columns share the width by how much they hold, within bounds.
+        double[] weight = new double[cols];
+        for (int c = 0; c < cols; c++)
+        {
+            double longest = 2;
+            for (int r = 0; r < rows; r++)
+            {
+                IList cells = data[r] as IList;
+                string value = cells != null && c < cells.Count && cells[c] != null ? Convert.ToString(cells[c], System.Globalization.CultureInfo.InvariantCulture) : "";
+                double length = 0;
+                foreach (char ch in System.Text.RegularExpressions.Regex.Replace(value, @"\\[a-zA-Z]+|[{}$^_\\]", "")) length += ch > 255 ? 2 : 1;
+                longest = Math.Max(longest, length);
+            }
+            weight[c] = Math.Max(8, Math.Min(longest, 40));
+        }
+        double total = 0;
+        foreach (double one in weight) total += one;
+        double cy = y;
+        for (int r = 0; r < rows; r++)
+        {
+            Unit(p);
+            IList cells = data[r] as IList;
+            dynamic band = Block(p, x, cy, w, rowHeight, r == 0 ? t.Primary : r % 2 == 0 ? t.Surface : t.Bg, false);
+            band.Name = "Row " + (r + 1);
+            double cx = x;
+            for (int c = 0; c < cols; c++)
+            {
+                double cw = w * weight[c] / total;
+                string value = cells != null && c < cells.Count && cells[c] != null ? Convert.ToString(cells[c], System.Globalization.CultureInfo.InvariantCulture) : "";
+                if (value.Length > 0) Label(p, cx + 12, cy, cw - 24, rowHeight, value, size / 1.2, r == 0 ? (t.Dark ? t.Bg : "#FFFFFF") : t.Text, r == 0, t.BodyFont, c == 0 ? 1 : 2, 3, r == 0 ? null : t.Accent);
+                cx += cw;
+            }
+            if (r > 0) Rule(p, x, cy + rowHeight, x + w, cy + rowHeight, t.Line, 0.5);
+            p.Motion.Add(band);
+            cy += rowHeight;
+        }
+    }
+
+    /// Round steps for an axis that must cover lo to hi (either may be negative).
+    static void Axis(ref double lo, ref double hi, out double step)
+    {
+        if (hi <= lo) { hi = lo + 1; }
+        double span = hi - lo, raw = span / 5, power = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+        step = 10 * power;
+        foreach (double m in new double[] { 1, 2, 2.5, 5, 10 }) if (m * power >= raw) { step = m * power; break; }
+        // An axis of positive values that starts near zero starts at zero.
+        if (lo >= 0 && lo < span * 0.6) lo = 0;
+        lo = Math.Floor(lo / step + 1e-9) * step;
+        hi = Math.Ceiling(hi / step - 1e-9) * step;
+    }
+
+    static string Tick(double value, double step)
+    {
+        int decimals = step >= 1 ? 0 : (int)Math.Min(4, Math.Ceiling(-Math.Log10(step) - 1e-9));
+        if (Math.Abs(step * Math.Pow(10, decimals) - Math.Round(step * Math.Pow(10, decimals))) > 1e-6) decimals = Math.Min(4, decimals + 1);
+        if (Math.Abs(value) < step * 1e-6) value = 0;
+        return value.ToString("F" + decimals, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// Points and curves over two number axes, drawn from shapes: a scatter of measurements, a fitted line, the graph of a function.
+    static void DrawXY(Page p, Dictionary<string, object> chart, string type, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        object raw;
+        IList series = chart.TryGetValue("series", out raw) ? raw as IList : null;
+        if (series == null || series.Count == 0) throw new Fail("BAD_ARGS", "A " + type + " chart needs \"series\": [{name?, points: [[x, y], ..]}] (or x: [..] and y: [..]).");
+        List<List<double[]>> all = new List<List<double[]>>();
+        List<string> names = new List<string>();
+        List<bool> joined = new List<bool>();
+        double x0 = double.MaxValue, x1 = double.MinValue, y0 = double.MaxValue, y1 = double.MinValue;
+        int m = Math.Min(series.Count, 6);
+        for (int s = 0; s < m; s++)
+        {
+            Dictionary<string, object> one = series[s] as Dictionary<string, object>;
+            List<double[]> points = new List<double[]>();
+            IList pairs = one != null && one.TryGetValue("points", out raw) ? raw as IList : one == null ? series[s] as IList : null;
+            if (pairs != null)
+            {
+                foreach (object pair in pairs)
+                {
+                    IList xy = pair as IList;
+                    if (xy != null && xy.Count >= 2) points.Add(new double[] { Number(xy[0]), Number(xy[1]) });
+                }
+            }
+            else if (one != null)
+            {
+                IList xs = one.TryGetValue("x", out raw) ? raw as IList : null, ys = one.TryGetValue("y", out raw) ? raw as IList : one.TryGetValue("values", out raw) ? raw as IList : null;
+                for (int i = 0; xs != null && ys != null && i < xs.Count && i < ys.Count; i++) points.Add(new double[] { Number(xs[i]), Number(ys[i]) });
+            }
+            if (points.Count == 0) throw new Fail("BAD_ARGS", "Series " + (s + 1) + " of the chart has no points: give points: [[x, y], ..] or x: [..] and y: [..].");
+            if (points.Count > 600) points = points.GetRange(0, 600);
+            foreach (double[] point in points) { x0 = Math.Min(x0, point[0]); x1 = Math.Max(x1, point[0]); y0 = Math.Min(y0, point[1]); y1 = Math.Max(y1, point[1]); }
+            all.Add(points);
+            names.Add(one != null && one.TryGetValue("name", out raw) && raw != null ? Convert.ToString(raw) : "");
+            bool line = type != "scatter";
+            if (one != null && one.TryGetValue("line", out raw) && raw != null) line = Truthy(raw) || Convert.ToString(raw) == "True" || Convert.ToString(raw) == "true";
+            joined.Add(line);
+        }
+        if (chart.TryGetValue("xMin", out raw) && raw != null) x0 = Number(raw);
+        if (chart.TryGetValue("xMax", out raw) && raw != null) x1 = Number(raw);
+        if (chart.TryGetValue("yMin", out raw) && raw != null) y0 = Number(raw);
+        if (chart.TryGetValue("yMax", out raw) && raw != null) y1 = Number(raw);
+        double xs1, ys1;
+        Axis(ref x0, ref x1, out xs1);
+        Axis(ref y0, ref y1, out ys1);
+        string xTitle = chart.TryGetValue("xTitle", out raw) && raw != null ? Convert.ToString(raw) : null;
+        string yTitle = chart.TryGetValue("yTitle", out raw) && raw != null ? Convert.ToString(raw) : chart.TryGetValue("unit", out raw) && raw != null ? Convert.ToString(raw) : null;
+        bool fit = chart.TryGetValue("fit", out raw) && raw != null && (Truthy(raw) || Convert.ToString(raw).ToLowerInvariant() == "true");
+        string[] tones = Palette(p);
+        bool legend = m > 1;
+        if (yTitle != null) Label(p, x, y, 300, 14, yTitle, 9.5, t.Muted, false, t.BodyFont, 1, 1, null);
+        if (legend)
+        {
+            double lx = x + w;
+            for (int s = m - 1; s >= 0; s--)
+            {
+                double width = 16 + names[s].Length * 11 + 14;
+                lx -= width;
+                Block(p, lx, y + 3, 9, 9, tones[s], false);
+                Label(p, lx + 14, y, width - 14, 14, names[s], 10, t.Muted, false, t.BodyFont, 1, 1, null);
+            }
+        }
+        double head = yTitle != null || legend ? 22 : 6, axis = 46, foot = xTitle != null ? 42 : 24;
+        double px = x + axis, pw = w - axis - 14, py = y + head + 10, ph = h - head - 10 - foot;
+        for (double gy = y0; gy <= y1 + ys1 * 1e-6; gy += ys1)
+        {
+            double sy = py + ph - ph * (gy - y0) / (y1 - y0);
+            bool zero = Math.Abs(gy) < ys1 * 1e-6;
+            Rule(p, px, sy, px + pw, sy, zero ? t.Muted : t.Line, zero || gy <= y0 + ys1 * 1e-6 ? 1 : 0.5);
+            Label(p, x, sy - 8, axis - 6, 16, Tick(gy, ys1), 9.5, t.Muted, false, t.BodyFont, 3, 3, null);
+        }
+        for (double gx = x0; gx <= x1 + xs1 * 1e-6; gx += xs1)
+        {
+            double sx = px + pw * (gx - x0) / (x1 - x0);
+            bool zero = Math.Abs(gx) < xs1 * 1e-6;
+            Rule(p, sx, py, sx, py + ph, zero ? t.Muted : t.Line, zero || gx <= x0 + xs1 * 1e-6 ? 1 : 0.5);
+            Label(p, sx - 30, py + ph + 5, 60, 16, Tick(gx, xs1), 9.5, t.Muted, false, t.BodyFont, 2, 1, null);
+        }
+        if (xTitle != null) Label(p, px, py + ph + 24, pw, 16, xTitle, 10.5, t.Muted, false, t.BodyFont, 2, 1, null);
+        for (int s = 0; s < m; s++)
+        {
+            List<double[]> points = all[s];
+            if (joined[s])
+            {
+                dynamic builder = null;
+                foreach (double[] point in points)
+                {
+                    // What leaves the plot is held at its edge.
+                    double cy = Math.Max(y0, Math.Min(y1, point[1])), cx = Math.Max(x0, Math.Min(x1, point[0]));
+                    float fx = PX(p, px + pw * (cx - x0) / (x1 - x0)), fy = PY(p, py + ph - ph * (cy - y0) / (y1 - y0));
+                    if (builder == null) builder = p.Slide.Shapes.BuildFreeform(0, fx, fy);
+                    else builder.AddNodes(0, 0, fx, fy);
+                }
+                if (builder != null && points.Count > 1)
+                {
+                    dynamic path = Track(p, builder.ConvertToShape());
+                    path.Fill.Visible = 0;
+                    path.Line.ForeColor.RGB = Bgr(tones[s]);
+                    path.Line.Weight = 2.25f * p.S;
+                    p.Motion.Add(path);
+                }
+            }
+            if (!joined[s] || points.Count <= 14)
+            {
+                double radius = points.Count > 120 ? 2.2 : points.Count > 40 ? 3 : 4;
+                foreach (double[] point in points)
+                {
+                    if (point[0] < x0 || point[0] > x1 || point[1] < y0 || point[1] > y1) continue;
+                    dynamic dot = Dot(p, px + pw * (point[0] - x0) / (x1 - x0), py + ph - ph * (point[1] - y0) / (y1 - y0), radius, tones[s]);
+                    if (!joined[s]) { try { dot.Fill.Transparency = points.Count > 60 ? 0.35f : 0.15f; } catch (Exception) { } }
+                }
+            }
+            if (fit && !joined[s] && points.Count >= 3)
+            {
+                // The least-squares line through the points, and how well it holds.
+                double n = points.Count, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+                foreach (double[] point in points) { sx += point[0]; sy += point[1]; sxx += point[0] * point[0]; sxy += point[0] * point[1]; syy += point[1] * point[1]; }
+                double den = n * sxx - sx * sx;
+                if (Math.Abs(den) > 1e-12)
+                {
+                    double slope = (n * sxy - sx * sy) / den, cut = (sy - slope * sx) / n;
+                    double varY = n * syy - sy * sy, r2 = varY > 1e-12 ? Math.Pow(n * sxy - sx * sy, 2) / (den * varY) : 1;
+                    double ax = x0, bx = x1, ay = slope * ax + cut, by = slope * bx + cut;
+                    // Kept inside the plot.
+                    if (Math.Abs(slope) > 1e-12)
+                    {
+                        if (ay < y0) { ax = (y0 - cut) / slope; ay = y0; } else if (ay > y1) { ax = (y1 - cut) / slope; ay = y1; }
+                        if (by < y0) { bx = (y0 - cut) / slope; by = y0; } else if (by > y1) { bx = (y1 - cut) / slope; by = y1; }
+                    }
+                    dynamic trend = Rule(p, px + pw * (ax - x0) / (x1 - x0), py + ph - ph * (ay - y0) / (y1 - y0), px + pw * (bx - x0) / (x1 - x0), py + ph - ph * (by - y0) / (y1 - y0), s == 0 ? t.Accent : tones[s], 1.75);
+                    try { trend.Line.DashStyle = 4; } catch (Exception) { }
+                    string sign = cut < 0 ? " − " : " + ";
+                    Label(p, px + pw - 250, py + 4 + s * 16, 244, 14, "y = " + slope.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "x" + sign + Math.Abs(cut).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "，R² = " + r2.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture), 10, s == 0 ? t.Accent : tones[s], false, t.BodyFont, 3, 1, null);
+                }
+            }
+        }
+    }
+
+    /// Shares of a whole as a pie or a ring, drawn from shapes, with the parts listed beside it.
+    static void DrawPie(Page p, Dictionary<string, object> chart, bool ring, double x, double y, double w, double h)
+    {
+        Theme t = p.T;
+        object raw;
+        IList categories = chart.TryGetValue("categories", out raw) ? raw as IList : null;
+        IList series = chart.TryGetValue("series", out raw) ? raw as IList : null;
+        IList list = chart.TryGetValue("values", out raw) ? raw as IList : null;
+        if (list == null && series != null && series.Count > 0)
+        {
+            Dictionary<string, object> one = series[0] as Dictionary<string, object>;
+            list = one != null && one.TryGetValue("values", out raw) ? raw as IList : series[0] as IList;
+        }
+        if (categories == null || list == null || categories.Count == 0) throw new Fail("BAD_ARGS", "A pie chart needs \"categories\": [..] and \"values\": [..] (or series: [{values}]).");
+        int n = Math.Min(Math.Min(categories.Count, list.Count), 8);
+        double[] values = new double[n];
+        double total = 0;
+        for (int i = 0; i < n; i++) { values[i] = Math.Max(0, Number(list[i])); total += values[i]; }
+        if (total <= 0) throw new Fail("BAD_ARGS", "The values of the pie chart add up to nothing.");
+        string unit = chart.TryGetValue("unit", out raw) && raw != null ? Convert.ToString(raw) : null;
+        Decimals = chart.TryGetValue("decimals", out raw) && raw != null ? (int)Number(raw) : -1;
+        string[] tones = Palette(p);
+        double d = Math.Min(h - 8, w * 0.5), cx = x + d / 2 + 8, cy = y + h / 2;
+        double angle = -90;
+        for (int i = 0; i < n; i++)
+        {
+            double sweep = 360 * values[i] / total;
+            if (sweep <= 0.05) continue;
+            if (sweep >= 359.9) { Dot(p, cx, cy, d / 2, tones[i]); break; }
+            dynamic slice = p.Slide.Shapes.AddShape(142, PX(p, cx - d / 2), PY(p, cy - d / 2), SX(p, d), SX(p, d));
+            double from = angle, to = angle + sweep;
+            // The shape counts its angles from −180 to 180.
+            while (from > 180) from -= 360;
+            while (to > 180) to -= 360;
+            try { slice.Adjustments[1] = (float)from; slice.Adjustments[2] = (float)to; } catch (Exception) { }
+            slice.Fill.Solid(); slice.Fill.ForeColor.RGB = Bgr(tones[i]);
+            slice.Line.Visible = -1; slice.Line.ForeColor.RGB = Bgr(t.Bg); slice.Line.Weight = 1.5f * p.S;
+            try { slice.Shadow.Visible = 0; } catch (Exception) { }
+            slice.Name = "Slice " + (i + 1);
+            Track(p, slice);
+            angle += sweep;
+        }
+        if (ring)
+        {
+            Dot(p, cx, cy, d * 0.29, t.Bg);
+            string centre = chart.TryGetValue("center", out raw) && raw != null ? Convert.ToString(raw) : Short(total) + (unit == null ? "" : " " + unit);
+            Label(p, cx - d * 0.27, cy - 22, d * 0.54, 44, centre, 20, t.Primary, true, t.TitleFont, 2, 3, null);
+        }
+        // The parts, largest first as given: name, value, share.
+        double lx = x + d + 44, lw = x + w - lx, row = Math.Min(40, (h - 8) / n), ly = y + (h - row * n) / 2;
+        for (int i = 0; i < n; i++)
+        {
+            Block(p, lx, ly + row / 2 - 6, 12, 12, tones[i], false);
+            Label(p, lx + 22, ly, lw - 150, row, Convert.ToString(categories[i]), 12, t.Text, false, t.BodyFont, 1, 3, null);
+            Label(p, lx + lw - 128, ly, 70, row, Short(values[i]) + (unit == null ? "" : " " + unit), 11, t.Muted, false, t.BodyFont, 3, 3, null);
+            Label(p, lx + lw - 54, ly, 54, row, (100 * values[i] / total).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "%", 12, tones[i] == t.Line ? t.Text : tones[i], true, t.BodyFont, 3, 3, null);
+            if (i < n - 1) Rule(p, lx, ly + row, lx + lw, ly + row, t.Line, 0.5);
+            ly += row;
+        }
+    }
+
     static void TableSlide(Page p, Bag op, double x, double y, double w, double h)
     {
         Theme t = p.T;
@@ -5919,8 +6487,16 @@ static class Program
         int rows = Math.Min(data.Count, 12), cols = 1;
         foreach (object row in data) { IList cells = row as IList; if (cells != null) cols = Math.Max(cols, cells.Count); }
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
-        double usable = h - (callout ? 54 : 0), rowHeight = Math.Min(46, usable / rows);
+        bool math = false;
+        foreach (object row in data) { IList cells = row as IList; if (cells != null) foreach (object cell in cells) if (cell != null && Convert.ToString(cell).IndexOf('$') >= 0) math = true; }
+        double usable = h - (callout ? 54 : 0), rowHeight = Math.Min(math ? 56 : 46, usable / rows);
         double tableTop = Settle(y, usable, rowHeight * rows);
+        if (math || op.Flag("drawn", false))
+        {
+            DrawnTable(p, data, rows, cols, x, tableTop, w, rowHeight, rows > 9 ? 12 : rows > 6 ? 14 : 16);
+            Callout(p, op, x, y + h - 42, w);
+            return;
+        }
         dynamic made = p.Slide.Shapes.AddTable(rows, cols, PX(p, x), PY(p, tableTop), SX(p, w), SY(p, rowHeight * rows));
         made.Name = "Table";
         Unit(p);
@@ -6034,6 +6610,8 @@ static class Program
         Theme t = p.T;
         object raw;
         string type = chart.TryGetValue("type", out raw) && raw != null ? Convert.ToString(raw).ToLowerInvariant() : "column";
+        if (type == "scatter" || type == "curve" || type == "xy" || type == "function") { DrawXY(p, chart, type, x, y, w, h); return; }
+        if (type == "pie" || type == "donut" || type == "doughnut" || type == "ring") { DrawPie(p, chart, type != "pie", x, y, w, h); return; }
         IList categories = chart.TryGetValue("categories", out raw) ? raw as IList : null;
         IList series = chart.TryGetValue("series", out raw) ? raw as IList : null;
         if (categories == null || series == null || categories.Count == 0 || series.Count == 0) throw new Fail("BAD_ARGS", "The chart needs \"categories\" and \"series\": [{name, values}].");

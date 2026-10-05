@@ -83,6 +83,8 @@ describe('office tools', () => {
     const help = await run('office_help', { app: 'ppt' })
     expect(help.text).toContain('add_smartart {')
     expect(help.text).toContain('slide {kind')
+    expect(help.text).toContain('canvas {')
+    expect(help.text).toContain('type: scatter')
     expect(help.text).toContain('#RRGGBB')
     const sheets = await run('office_help', { app: 'excel' })
     expect(sheets.text).toContain('pivot {')
