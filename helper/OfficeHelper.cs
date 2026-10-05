@@ -272,7 +272,8 @@ class Card : Form
         using (Font font = new Font("Microsoft YaHei UI", 9f))
         {
             int right = Width - S(10);
-            Chip(g, font, "逐字", Program.Typing, ref right, out typingBox);
+            // "Fast" is lit when the text is written at once; unlit, it is written the way a person types.
+            Chip(g, font, "快速", !Program.Typing, ref right, out typingBox);
             bool following = Program.Following && Watching();
             Chip(g, font, following ? "查看中" : "查看", following, ref right, out followBox);
             using (SolidBrush dot = new SolidBrush(Color.FromArgb(217, 119, 87))) g.FillEllipse(dot, S(12), (Height - S(8)) / 2, S(8), S(8));
@@ -591,7 +592,7 @@ static class Program
         {
             // The agent's turn ended: say so and let the card go.
             Card.Hold = a.Flag("hold", false);
-            if (cardStarted) Card.Report(a.Str("text", "AI 已完成"));
+            if (cardStarted) Card.Report(a.Str("text", "AI 已完成"), a.Num("seconds", 2.5));
             return "ok";
         }
         if (cmd == "status") return Status();
@@ -2700,6 +2701,22 @@ static class Program
 
     static dynamic Cells(dynamic sheet, string address)
     {
+        int bang = address.LastIndexOf('!');
+        if (bang > 0)
+        {
+            // "汇总!B2:D10": the sheet named there, not the one the operation is on.
+            string name = address.Substring(0, bang).Trim('\'', '=');
+            dynamic other;
+            try { other = sheet.Parent.Worksheets[name]; }
+            catch (COMException)
+            {
+                List<string> names = new List<string>();
+                foreach (dynamic one in sheet.Parent.Worksheets) names.Add((string)one.Name);
+                throw new Fail("ANCHOR_MISSING", "There is no sheet \"" + name + "\" (in \"" + address + "\"). Sheets: " + string.Join(", ", names.ToArray()) + ".");
+            }
+            sheet = other;
+            address = address.Substring(bang + 1);
+        }
         try { return sheet.Range[address]; }
         catch (COMException) { throw new Fail("BAD_ARGS", "\"" + address + "\" is not a valid range (use A1 style, e.g. B2:D10)."); }
     }
@@ -3964,13 +3981,37 @@ static class Program
         if (type == "freeze")
         {
             dynamic cell = Cells(ws, op.Str("cell", "A2")).Cells[1, 1];
+            ws = cell.Worksheet;
+            dynamic window = book.Windows[1];
+            // Panes belong to the window as it shows this sheet: the sheet must be the one in front, in the normal view.
+            dynamic was = null;
+            try { was = book.ActiveSheet; } catch (Exception) { }
             ws.Activate();
-            dynamic window = app.ActiveWindow;
-            window.FreezePanes = false;
-            window.ScrollRow = 1; window.ScrollColumn = 1;
-            window.SplitRow = (int)cell.Row - 1;
-            window.SplitColumn = (int)cell.Column - 1;
-            window.FreezePanes = (int)cell.Row > 1 || (int)cell.Column > 1;
+            try { if ((int)window.View != 1) window.View = 1; } catch (Exception) { }
+            Exception last = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    try { window.FreezePanes = false; } catch (Exception) { }
+                    try { window.Split = false; } catch (Exception) { }
+                    window.ScrollRow = 1; window.ScrollColumn = 1;
+                    window.SplitRow = (int)cell.Row - 1;
+                    window.SplitColumn = (int)cell.Column - 1;
+                    window.FreezePanes = (int)cell.Row > 1 || (int)cell.Column > 1;
+                    last = null;
+                    break;
+                }
+                catch (Exception error)
+                {
+                    last = error;
+                    // Excel refuses while the window is not the active one: bring it forward inside Excel and try again.
+                    try { window.Activate(); } catch (Exception) { }
+                    Thread.Sleep(150);
+                }
+            }
+            if (!Following && was != null) { try { was.Activate(); } catch (Exception) { } }
+            if (last != null) throw new Fail("OFFICE_ERROR", "Excel would not freeze the panes of \"" + (string)ws.Name + "\" just now (" + last.Message.Trim() + "). The rest of your batch can go on without it; it is a convenience for scrolling only.");
             return "panes frozen above and left of " + (string)cell.Address[false, false];
         }
         if (type == "validation")

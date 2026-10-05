@@ -45,7 +45,7 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Write text progressively like typing instead of all at once (about 0.3 s more per paragraph)' },
   }),
   card: z.boolean().default(true).volatile().i18n({
-    'zh-CN': { $description: 'AI 编辑时在屏幕右下角显示迷你卡片，可随时开关“跟随”和“逐字”' },
+    'zh-CN': { $description: 'AI 编辑时在屏幕右下角显示迷你卡片，可随时开关“查看”和“快速”（快速 = 不逐字写入）' },
     'en-US': { $description: 'Show a small card at the bottom right while the AI edits, with switches for following and typing' },
   }),
   finalCheck: z.boolean().default(true).volatile().i18n({
@@ -122,6 +122,21 @@ export function apply(ctx: Context, config: Config = {}): void {
       .catch(() => { installed = undefined; return new Set<string>() })
     return installed
   }
+  // The card stays up between the steps of an agent that is working on a document, and goes when that agent stops.
+  const working = new WeakSet<object>()
+  let carded = false
+  ctx.on('tools/pre-execute', (exec, next) => {
+    if (exec.name.startsWith('office_') && exec.agent) { working.add(exec.agent as object); carded = true }
+    return next()
+  })
+  const retire = (agent: unknown): void => {
+    if (!carded || typeof agent !== 'object' || agent === null || !working.has(agent)) return
+    working.delete(agent)
+    void helper.call('card', { text: 'AI 已完成', hold: false }, 5_000).catch(() => {})
+  }
+  ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') retire(agent) })
+  ctx.on('agent/disposed', ({ agent }) => { retire(agent) })
+
   const redirected = new Set<string>()
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (exec.name !== 'skill' || !settings().preferLive) return next()

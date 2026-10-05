@@ -164,7 +164,7 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
         h(Switch, { checked: settings.typing, disabled, label: '逐字写入', onChange: value => { void change('typing', value) } }),
       ),
       h('div', { style: S.toggleRow },
-        h('div', { style: S.toggleText }, '迷你卡片', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 每次动手修改文档时，屏幕右下角显示一张小卡片：正在改哪个文档、改到第几项，以及“查看”“逐字”两个开关，点一下立即生效（连正在进行的这一批也会跟着变）。卡片可拖动，不抢焦点；这一批改完就消失，下一批开始时再出现。在卡片上切换过的开关，本次运行期间以卡片为准。')),
+        h('div', { style: S.toggleText }, '迷你卡片', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'AI 每次动手修改文档时，屏幕右下角显示一张小卡片：正在改哪个文档、改到第几项，以及“查看”“快速”两个开关（“快速”亮起时一次写入，熄灭时逐字写入），点一下立即生效（连正在进行的这一批也会跟着变）。卡片可拖动，不抢焦点；AI 这一轮结束时消失。在卡片上切换过的开关，本次运行期间以卡片为准。')),
         h(Switch, { checked: settings.card, disabled, label: '迷你卡片', onChange: value => { void change('card', value) } }),
       ),
       h('div', { style: S.toggleRow },
