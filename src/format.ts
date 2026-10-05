@@ -12,7 +12,7 @@ export interface AppStatus { app: AppKind; installed: boolean; running: boolean;
 
 export interface WordItem { i: number; text?: string; style?: string; level?: number; to?: number; table?: number; size?: string; open?: boolean; inTable?: boolean }
 export interface WordRead { paragraphs: number; tables: number; pages?: number; from?: number; items?: WordItem[]; more?: string; table?: number; cells?: Array<Array<string | null>> }
-export interface ExcelRead { sheets: Array<{ name: string; used: string; charts?: number }>; sheet: string; range: string; values: unknown[][]; formulas?: Array<{ cell: string; formula: string }>; clipped?: string }
+export interface ExcelRead { sheets: Array<{ name: string; used: string; charts?: number }>; sheet: string; range: string; values: unknown[][]; formulas?: Array<{ cell: string; formula: string }>; clipped?: string; objects?: string[]; profile?: string[] }
 export interface PptRead { slides: number; width: number; height: number; items: Array<{ slide: number; layout?: string; plain?: number; shapes: Array<{ name: string; id?: number; type: string; box: number[]; text?: string }> }> }
 export interface EditResult { done: string[]; total: number; failed?: { index: number; op: string; error: string; code: string } }
 
@@ -62,7 +62,9 @@ export function formatExcel(read: ExcelRead): string {
   const first = Number(/\d+/.exec(read.range)?.[0] ?? 1)
   const rows = read.values.map((row, index) => `${first + index}: ${row.map(cell).join(' | ')}`)
   const formulas = read.formulas?.length ? [`Formulas: ${read.formulas.map(item => `${item.cell} ${item.formula}`).join('; ')}`] : []
-  return [`Sheets: ${sheets}.`, `${read.sheet}!${read.range} (values; one line per row):`, ...rows, ...formulas, ...(read.clipped ? [read.clipped] : [])].join('\n')
+  const objects = read.objects?.length ? [`On this sheet: ${read.objects.join('; ')}.`] : []
+  const profile = read.profile?.length ? ['What the columns hold (the whole block, not only the rows shown):', ...read.profile.map(line => `  ${line}`)] : []
+  return [`Sheets: ${sheets}.`, `${read.sheet}!${read.range} (values; one line per row):`, ...rows, ...formulas, ...(read.clipped ? [read.clipped] : []), ...objects, ...profile].join('\n')
 }
 
 export function formatPpt(read: PptRead): string {

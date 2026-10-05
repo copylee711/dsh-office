@@ -84,6 +84,9 @@ describe('office tools', () => {
     expect(help.text).toContain('add_smartart {')
     expect(help.text).toContain('slide {kind')
     expect(help.text).toContain('#RRGGBB')
+    const sheets = await run('office_help', { app: 'excel' })
+    expect(sheets.text).toContain('pivot {')
+    expect(sheets.text).toContain('clean {')
   })
 
   it('passes a batch to the helper and reports where it stopped', async () => {

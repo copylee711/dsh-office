@@ -2761,12 +2761,25 @@ static class Program
         List<object> grid = new List<object>();
         List<object> formulaList = new List<object>();
         object[,] v = values as object[,], f = formulas as object[,];
+        bool[] dated = new bool[cols + 1];
+        if (v != null) for (int c = 1; c <= cols; c++) { try { dated[c] = DateColumn(range.Columns[c], v, c); } catch (Exception) { } }
         for (int r = 1; r <= rows; r++)
         {
             List<object> line = new List<object>();
             for (int c = 1; c <= cols; c++)
             {
-                line.Add(CellValue(v == null ? values : v[r, c]));
+                object one = CellValue(v == null ? values : v[r, c]);
+                if (one is double) one = double.Parse(((double)one).ToString("G12", System.Globalization.CultureInfo.InvariantCulture), System.Globalization.CultureInfo.InvariantCulture);
+                if (dated[c] && IsNumber(one))
+                {
+                    try
+                    {
+                        DateTime day = DateTime.FromOADate(Convert.ToDouble(one));
+                        one = day.TimeOfDay.TotalSeconds < 1 ? day.ToString("yyyy-MM-dd") : day.ToString("yyyy-MM-dd HH:mm");
+                    }
+                    catch (Exception) { }
+                }
+                line.Add(one);
                 string formula = Convert.ToString(f == null ? formulas : f[r, c]);
                 if (formula.StartsWith("=", StringComparison.Ordinal))
                 {
@@ -2777,6 +2790,19 @@ static class Program
         }
         result["values"] = grid;
         if (formulaList.Count > 0) result["formulas"] = formulaList;
+        List<object> objects = Objects(sheet);
+        if (objects.Count > 0) result["objects"] = objects;
+        // A table too long to show whole is described column by column instead; so is any block when asked.
+        if (a.Flag("profile", result.ContainsKey("clipped") && !a.Has("range")))
+        {
+            try
+            {
+                dynamic whole = a.Has("range") ? Cells(sheet, a.Need("range")) : sheet.UsedRange;
+                if ((long)whole.Rows.Count * (long)whole.Columns.Count <= 3000000) result["profile"] = Profile(whole);
+            }
+            catch (Fail) { throw; }
+            catch (Exception) { }
+        }
         return result;
     }
 
@@ -2834,6 +2860,8 @@ static class Program
             return "sheet \"" + (string)sheet.Name + "\" added";
         }
         dynamic ws = Sheet(book, op);
+        string worked = ExcelData(app, book, ws, type, op);
+        if (worked != null) return worked;
         if (type == "write_range")
         {
             IList rows = op.List("values");
@@ -2861,7 +2889,7 @@ static class Program
             }
             else target.Formula = grid;
             ExcelFormat(target, op);
-            return "wrote " + (string)target.Address[false, false];
+            return "wrote " + (string)target.Address[false, false] + Errors(target);
         }
         if (type == "format_range") { ExcelFormat(Cells(ws, op.Need("range")), op); return "formatted"; }
         if (type == "autofit")
@@ -2886,20 +2914,1096 @@ static class Program
             if (type == "insert_rows") rows.Insert(); else rows.Delete();
             return (type == "insert_rows" ? "inserted " : "deleted ") + count + " row(s)";
         }
+        throw new Fail("BAD_ARGS", "Unknown Excel operation \"" + type + "\".");
+    }
+
+    // ───────────────────────── Excel: data work ─────────────────────────
+
+    /// The block of data an operation works on: the given range, or everything that is filled on the sheet.
+    static dynamic Data(dynamic ws, Bag op)
+    {
+        return op.Has("range") ? Cells(ws, op.Need("range")) : ws.UsedRange;
+    }
+
+    /// A range that may name its sheet ("产品表!A1:C9"); without one it is on the sheet at hand.
+    static dynamic Ref(dynamic book, dynamic ws, string address)
+    {
+        int bang = address.LastIndexOf('!');
+        if (bang < 0) return Cells(ws, address);
+        string sheet = address.Substring(0, bang).Trim('\'', '=');
+        dynamic other;
+        try { other = book.Worksheets[sheet]; }
+        catch (COMException) { throw new Fail("ANCHOR_MISSING", "There is no sheet \"" + sheet + "\"."); }
+        return Cells(other, address.Substring(bang + 1));
+    }
+
+    static string Text(object value)
+    {
+        return value == null ? "" : Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// The first row of a block, as texts.
+    static List<string> Headers(dynamic data)
+    {
+        List<string> heads = new List<string>();
+        int cols = (int)data.Columns.Count;
+        object raw = data.Rows[1].Value2;
+        object[,] row = raw as object[,];
+        for (int c = 1; c <= cols; c++) heads.Add(Text(row == null ? raw : row[1, c]).Trim());
+        return heads;
+    }
+
+    /// A column of a block by its header text, its letter ("C") or its position in the block; the position is returned.
+    static int Col(dynamic data, object key)
+    {
+        int cols = (int)data.Columns.Count;
+        List<string> heads = Headers(data);
+        string name = Text(key).Trim();
+        for (int c = 0; c < heads.Count; c++) if (string.Equals(heads[c], name, StringComparison.OrdinalIgnoreCase)) return c + 1;
+        if (key is int || key is double || key is decimal || key is long)
+        {
+            int at = Convert.ToInt32(key);
+            if (at >= 1 && at <= cols) return at;
+        }
+        if (name.Length > 0 && name.Length <= 3 && System.Text.RegularExpressions.Regex.IsMatch(name, "^[A-Za-z]+\\z"))
+        {
+            int letter = 0;
+            foreach (char ch in name.ToUpperInvariant()) letter = letter * 26 + (ch - 'A' + 1);
+            int at = letter - (int)data.Column + 1;
+            if (at >= 1 && at <= cols) return at;
+        }
+        throw new Fail("ANCHOR_MISSING", "There is no column \"" + name + "\" in " + (string)data.Address[false, false] + ". Its headers: " + string.Join(", ", heads.ToArray()) + ".");
+    }
+
+    /// The columns an operation names ("columns": [..] or "column": one), as positions in the block; all of them when none is named.
+    static List<int> Cols(dynamic data, Bag op, bool allWhenNone)
+    {
+        List<int> list = new List<int>();
+        IList many = op.List("columns");
+        if (many != null) foreach (object key in many) list.Add(Col(data, key));
+        else if (op.Has("column")) list.Add(Col(data, op.Raw("column")));
+        else if (allWhenNone) for (int c = 1; c <= (int)data.Columns.Count; c++) list.Add(c);
+        return list;
+    }
+
+    static object[,] Grid(dynamic range)
+    {
+        object raw = range.Value2;
+        object[,] grid = raw as object[,];
+        if (grid != null) return grid;
+        grid = (object[,])Array.CreateInstance(typeof(object), new int[] { 1, 1 }, new int[] { 1, 1 });
+        grid[1, 1] = raw;
+        return grid;
+    }
+
+    static bool IsNumber(object value) { return value is double || value is int || value is decimal || value is float || value is long; }
+
+    static bool IsBlank(object value) { return value == null || (value is string && ((string)value).Trim().Length == 0); }
+
+    static string Tidy(string text)
+    {
+        string s = text.Replace(' ', ' ').Replace('　', ' ').Replace("\t", " ").Trim();
+        while (s.Contains("  ")) s = s.Replace("  ", " ");
+        return s;
+    }
+
+    /// A number out of what a person typed: "¥1,299", "89元", "10%", " 12 件".
+    static bool ParseNumber(string text, out double number)
+    {
+        number = 0;
+        string s = Tidy(text).Replace(",", "").Replace("，", "").Replace(" ", "");
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(s, "^[¥￥$€£]?\\s*([-+]?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?)\\s*(%|％)?\\s*(?:[^\\d\\s\\-.,A-Za-z%％]{1,3}|kg|g|km|cm|mm|m|pcs|k|w)?\\z");
+        if (!m.Success) return false;
+        if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out number)) return false;
+        if (m.Groups[2].Success) number /= 100;
+        return true;
+    }
+
+    /// A date out of what a person typed: 2025/3/1, 2025.03.01, 20250301, 2025年3月1日, 3月1日 (the year given).
+    static bool ParseDate(string text, int year, out DateTime date)
+    {
+        date = DateTime.MinValue;
+        string s = Tidy(text);
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(s, "^(\\d{4})(\\d{2})(\\d{2})\\z");
+        if (!m.Success) m = System.Text.RegularExpressions.Regex.Match(s, "^(\\d{4})\\s*[-/.年]\\s*(\\d{1,2})\\s*[-/.月]\\s*(\\d{1,2})\\s*日?(?:\\s.*)?\\z");
+        int y = 0, mo = 0, d = 0;
+        if (m.Success) { y = int.Parse(m.Groups[1].Value); mo = int.Parse(m.Groups[2].Value); d = int.Parse(m.Groups[3].Value); }
+        else
+        {
+            m = System.Text.RegularExpressions.Regex.Match(s, "^(\\d{1,2})\\s*[-/.月]\\s*(\\d{1,2})\\s*日?\\z");
+            if (m.Success) { y = year; mo = int.Parse(m.Groups[1].Value); d = int.Parse(m.Groups[2].Value); }
+        }
+        if (m.Success)
+        {
+            if (y < 1900 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > DateTime.DaysInMonth(y, mo)) return false;
+            date = new DateTime(y, mo, d);
+            return true;
+        }
+        return DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out date) && date.Year >= 1900;
+    }
+
+    /// Whether the numbers of a column are shown as dates.
+    static bool DateColumn(dynamic column, object[,] grid, int c)
+    {
+        int rows = grid.GetLength(0), seen = 0, dates = 0;
+        for (int r = 2; r <= rows && seen < 12; r++)
+        {
+            if (!IsNumber(grid[r, c])) continue;
+            seen++;
+            try
+            {
+                string format = Convert.ToString(column.Cells[r, 1].NumberFormat);
+                if (System.Text.RegularExpressions.Regex.IsMatch(format, "[ymd年月日]", System.Text.RegularExpressions.RegexOptions.IgnoreCase) && !format.Contains("0.0") && format != "General") dates++;
+            }
+            catch (Exception) { }
+        }
+        return seen > 0 && dates * 2 > seen;
+    }
+
+    static string Plain(double number)
+    {
+        if (Math.Abs(number - Math.Round(number)) < 1e-9 && Math.Abs(number) < 1e15) return Math.Round(number).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+        return number.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// What is in each column of a block: kinds of values, range, the commonest texts, and what looks wrong. This is
+    /// how a long table is understood without reading every row.
+    static List<object> Profile(dynamic data)
+    {
+        List<object> lines = new List<object>();
+        object[,] grid = Grid(data);
+        int rows = grid.GetLength(0), cols = grid.GetLength(1), row0 = (int)data.Row, col0 = (int)data.Column;
+        if (rows < 2) return lines;
+        int emptyRows = 0;
+        Dictionary<string, int> whole = new Dictionary<string, int>();
+        int sameRows = 0;
+        for (int r = 2; r <= rows; r++)
+        {
+            StringBuilder key = new StringBuilder();
+            bool any = false;
+            for (int c = 1; c <= cols; c++) { if (!IsBlank(grid[r, c])) any = true; key.Append(Text(grid[r, c])).Append('\u0001'); }
+            if (!any) { emptyRows++; continue; }
+            string k = key.ToString();
+            if (whole.ContainsKey(k)) sameRows++; else whole[k] = 1;
+        }
+        lines.Add((rows - 1) + " data row(s) under the header row " + row0 + (emptyRows > 0 ? "; " + emptyRows + " entirely empty row(s)" : "") + (sameRows > 0 ? "; " + sameRows + " row(s) repeat an earlier row exactly" : "") + ".");
+        for (int c = 1; c <= cols; c++)
+        {
+            int blank = 0, numbers = 0, texts = 0, errors = 0, spaced = 0, numberLike = 0, dateLike = 0, negative = 0;
+            double min = double.MaxValue, max = double.MinValue, sum = 0;
+            Dictionary<string, int> seen = new Dictionary<string, int>();
+            List<double> all = new List<double>();
+            for (int r = 2; r <= rows; r++)
+            {
+                object v = grid[r, c];
+                if (IsBlank(v)) { blank++; continue; }
+                if (v is int && CellValue(v) is string) { errors++; continue; }
+                string shown = Text(v);
+                if (IsNumber(v))
+                {
+                    double n = Convert.ToDouble(v);
+                    numbers++; sum += n; all.Add(n);
+                    if (n < min) min = n;
+                    if (n > max) max = n;
+                    if (n < 0) negative++;
+                }
+                else
+                {
+                    texts++;
+                    string s = (string)(v as string ?? shown);
+                    if (s != Tidy(s)) spaced++;
+                    double n; DateTime d;
+                    bool dateShaped = System.Text.RegularExpressions.Regex.IsMatch(Tidy(s), "^(\\d{8}|\\d{4}\\s*[-/.年]\\s*\\d{1,2}\\s*[-/.月]\\s*\\d{1,2}.*|\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日?)\\z");
+                    if (dateShaped && ParseDate(s, DateTime.Now.Year, out d)) dateLike++;
+                    else if (ParseNumber(s, out n)) numberLike++;
+                }
+                int count;
+                seen[shown] = seen.TryGetValue(shown, out count) ? count + 1 : 1;
+            }
+            bool dates = numbers > 0 && DateColumn(data.Columns[c], grid, c);
+            StringBuilder line = new StringBuilder();
+            string head = Text(grid[1, c]).Trim();
+            line.Append(Column(col0 + c - 1)).Append(' ').Append(head.Length == 0 ? "(no header)" : "\"" + head + "\"").Append(": ");
+            List<string> kinds = new List<string>();
+            if (numbers > 0) kinds.Add(numbers + (dates ? " date(s)" : " number(s)"));
+            if (texts > 0) kinds.Add(texts + " text");
+            if (blank > 0) kinds.Add(blank + " blank");
+            if (errors > 0) kinds.Add(errors + " error(s)");
+            line.Append(kinds.Count == 0 ? "empty" : string.Join(", ", kinds.ToArray()));
+            if (numbers > 0)
+            {
+                if (dates) line.Append("; from " + DateTime.FromOADate(min).ToString("yyyy-MM-dd") + " to " + DateTime.FromOADate(max).ToString("yyyy-MM-dd"));
+                else
+                {
+                    all.Sort();
+                    double median = all.Count % 2 == 1 ? all[all.Count / 2] : (all[all.Count / 2 - 1] + all[all.Count / 2]) / 2;
+                    line.Append("; min " + Plain(min) + ", median " + Plain(median) + ", mean " + Plain(Math.Round(sum / numbers, 2)) + ", max " + Plain(max) + ", sum " + Plain(Math.Round(sum, 2)));
+                    if (negative > 0) line.Append("; " + negative + " negative");
+                    // Values far beyond the bulk of the column: more than three times the spread above the upper quartile.
+                    if (all.Count >= 20)
+                    {
+                        double q1 = all[all.Count / 4], q3 = all[all.Count * 3 / 4], fence = q3 + 3 * Math.Max(q3 - q1, 1e-9);
+                        int far = 0;
+                        foreach (double n in all) if (n > fence) far++;
+                        if (far > 0 && far <= all.Count / 20) line.Append("; " + far + " far above the rest (over " + Plain(Math.Round(fence, 2)) + ")");
+                    }
+                }
+            }
+            int distinct = seen.Count, filled = numbers + texts;
+            if (dates && texts == 0) { }
+            else if (dates) line.Append("; the texts are written in other ways, e.g. " + Sample(grid, c));
+            else if (texts > 0 || (numbers > 0 && distinct <= 12))
+            {
+                line.Append("; " + distinct + " distinct");
+                if (distinct <= 40 || distinct * 2 < filled)
+                {
+                    List<KeyValuePair<string, int>> top = new List<KeyValuePair<string, int>>(seen);
+                    top.Sort(delegate(KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value != a.Value ? b.Value.CompareTo(a.Value) : string.CompareOrdinal(a.Key, b.Key); });
+                    List<string> parts = new List<string>();
+                    int limit = distinct <= 24 ? 24 : 10;
+                    for (int i = 0; i < top.Count && i < limit; i++) parts.Add("\"" + Clip(top[i].Key, 24) + "\" " + top[i].Value);
+                    line.Append(": " + string.Join(", ", parts.ToArray()) + (top.Count > limit ? ", .." : ""));
+                }
+                else if (filled > distinct) line.Append(" (" + (filled - distinct) + " repeat an earlier value)");
+            }
+            List<string> odd = new List<string>();
+            if (spaced > 0) odd.Add(spaced + " with stray spaces");
+            if (numberLike > 0) odd.Add(numberLike + " number(s) written as text");
+            if (dateLike > 0) odd.Add(dateLike + " date(s) written as text");
+            if (numbers > 0 && texts > 0) odd.Add("mixed numbers and text");
+            if (odd.Count > 0) line.Append(". LOOK: " + string.Join(", ", odd.ToArray()));
+            lines.Add(line.ToString());
+        }
+        return lines;
+    }
+
+    /// A few of the texts of a column, one of each shape (digits read as 0), to show how they are written.
+    static string Sample(object[,] grid, int c)
+    {
+        Dictionary<string, string> shapes = new Dictionary<string, string>();
+        for (int r = 2; r <= grid.GetLength(0) && shapes.Count < 5; r++)
+        {
+            string s = grid[r, c] as string;
+            if (s == null || s.Trim().Length == 0) continue;
+            string shape = System.Text.RegularExpressions.Regex.Replace(s, "\\d", "0");
+            if (!shapes.ContainsKey(shape)) shapes[shape] = s;
+        }
+        List<string> parts = new List<string>();
+        foreach (string one in shapes.Values) parts.Add("\"" + Clip(one, 20) + "\"");
+        return string.Join(", ", parts.ToArray());
+    }
+
+    /// Charts, pivot tables and tables of a sheet, so that they can be named in later operations.
+    static List<object> Objects(dynamic ws)
+    {
+        List<object> lines = new List<object>();
+        try
+        {
+            foreach (dynamic holder in ws.ChartObjects())
+            {
+                string title = "";
+                try { if (Truthy(holder.Chart.HasTitle)) title = " \"" + (string)holder.Chart.ChartTitle.Text + "\""; } catch (Exception) { }
+                string place = "";
+                try { place = " at " + (string)holder.TopLeftCell.Address[false, false] + ":" + (string)holder.BottomRightCell.Address[false, false]; } catch (Exception) { }
+                int series = 0;
+                try { series = (int)holder.Chart.SeriesCollection().Count; } catch (Exception) { }
+                lines.Add("chart \"" + (string)holder.Name + "\"" + title + place + ", " + series + " series");
+            }
+        }
+        catch (Exception) { }
+        try { foreach (dynamic pivot in ws.PivotTables()) lines.Add("pivot table \"" + (string)pivot.Name + "\" at " + (string)pivot.TableRange1.Address[false, false]); } catch (Exception) { }
+        try { foreach (dynamic table in ws.ListObjects) lines.Add("table \"" + (string)table.Name + "\" at " + (string)table.Range.Address[false, false]); } catch (Exception) { }
+        try { if (Truthy(ws.AutoFilterMode)) lines.Add("a filter is on: some rows may be hidden (clear_filter shows them all)"); } catch (Exception) { }
+        return lines;
+    }
+
+    /// Delete whole rows of a sheet, given by their numbers; from the bottom up, several at a time.
+    static void DeleteRows(dynamic ws, List<int> rows)
+    {
+        rows.Sort();
+        for (int i = rows.Count - 1; i >= 0; )
+        {
+            StringBuilder address = new StringBuilder();
+            int taken = 0;
+            while (i >= 0 && taken < 18)
+            {
+                // Runs of neighbouring rows go as one piece.
+                int last = rows[i], first = last;
+                while (i > 0 && rows[i - 1] == first - 1) { i--; first = rows[i]; }
+                i--;
+                if (address.Length > 0) address.Append(',');
+                address.Append(first).Append(':').Append(last);
+                taken++;
+            }
+            ws.Range[address.ToString()].Delete();
+        }
+    }
+
+    static string RowList(List<int> rows)
+    {
+        List<string> parts = new List<string>();
+        for (int i = 0; i < rows.Count && i < 12; i++) parts.Add(rows[i].ToString());
+        return string.Join(", ", parts.ToArray()) + (rows.Count > 12 ? ", .." : "");
+    }
+
+    /// Errors among the results of formulas just written: said at once, so that they are not found later.
+    static string Errors(dynamic range)
+    {
+        try
+        {
+            object[,] grid = Grid(range);
+            int bad = 0;
+            string first = null, kind = null;
+            int row0 = (int)range.Row, col0 = (int)range.Column;
+            for (int r = 1; r <= grid.GetLength(0); r++)
+            {
+                for (int c = 1; c <= grid.GetLength(1); c++)
+                {
+                    object shown = CellValue(grid[r, c]);
+                    if (!(grid[r, c] is int) || !(shown is string)) continue;
+                    bad++;
+                    if (first == null) { first = Column(col0 + c - 1) + (row0 + r - 1); kind = (string)shown; }
+                }
+            }
+            return bad == 0 ? "" : " — " + bad + " cell(s) show an error (first: " + first + " " + kind + "): fix the formula or the data it reads";
+        }
+        catch (Exception) { return ""; }
+    }
+
+    static int ChartKind(string kind)
+    {
+        switch (kind)
+        {
+            case "bar": return 57;
+            case "stacked": case "stacked column": return 52;
+            case "stacked bar": return 58;
+            case "line": return 65;
+            case "smooth": return 4;
+            case "pie": return 5;
+            case "doughnut": case "donut": return -4120;
+            case "scatter": return -4169;
+            case "scatter line": return 74;
+            case "area": return 1;
+            case "radar": return -4151;
+            case "column": case "combo": return 51;
+        }
+        throw new Fail("BAD_ARGS", "Unknown chart \"" + kind + "\": use column, bar, stacked, stacked bar, line, pie, doughnut, scatter, scatter line, area, radar or combo.");
+    }
+
+    /// Fill in or change a chart from the fields of an operation.
+    static string Chart(dynamic book, dynamic ws, dynamic holder, Bag op, bool fresh)
+    {
+        dynamic chart = holder.Chart;
+        string kind = fresh ? op.Str("type", op.Str("chart", "column")) : op.Str("type", null);
+        IList series = op.List("series");
+        if (series != null || op.Has("range"))
+        {
+            // A chart made while the selection is inside data arrives with series of Excel's own guessing.
+            try { while ((int)chart.SeriesCollection().Count > 0) chart.SeriesCollection(1).Delete(); } catch (Exception) { }
+        }
+        if (series != null)
+        {
+            dynamic categories = op.Has("categories") ? Ref(book, ws, op.Need("categories")) : null;
+            foreach (object raw in series)
+            {
+                Bag item = new Bag(raw);
+                dynamic one = chart.SeriesCollection().NewSeries();
+                one.Values = Ref(book, ws, item.Need("values"));
+                if (item.Has("x")) one.XValues = Ref(book, ws, item.Need("x"));
+                else if (categories != null) one.XValues = categories;
+                if (item.Has("name"))
+                {
+                    string name = item.Need("name");
+                    // A cell reference names the series after that cell; anything else is the name itself.
+                    if (System.Text.RegularExpressions.Regex.IsMatch(name, "^(?:[^!]+!)?\\$?[A-Za-z]{1,3}\\$?\\d+\\z")) one.Name = "=" + (string)Ref(book, ws, name).Address[true, true, 1, true];
+                    else one.Name = name;
+                }
+            }
+        }
+        else if (op.Has("range")) chart.SetSourceData(Ref(book, ws, op.Need("range")));
+        if (kind != null) chart.ChartType = ChartKind(kind);
+        if (series != null)
+        {
+            int index = 0;
+            foreach (object raw in series)
+            {
+                index++;
+                Bag item = new Bag(raw);
+                dynamic one = chart.SeriesCollection(index);
+                if (item.Has("chart")) one.ChartType = ChartKind(item.Need("chart"));
+                else if (kind == "combo" && index == series.Count && series.Count > 1) one.ChartType = 65;
+                if (item.Str("axis", "") == "secondary" || item.Str("axis", "") == "right") one.AxisGroup = 2;
+                if (item.Has("color")) { try { one.Format.Fill.ForeColor.RGB = Bgr(item.Need("color")); one.Format.Line.ForeColor.RGB = Bgr(item.Need("color")); } catch (Exception) { } }
+            }
+        }
+        if (op.Has("title")) { chart.HasTitle = true; chart.ChartTitle.Text = op.Need("title"); try { chart.ChartTitle.Font.Size = 13; chart.ChartTitle.Font.Bold = true; } catch (Exception) { } }
+        else if (fresh) { try { chart.HasTitle = false; } catch (Exception) { } }
+        bool round = kind == "pie" || kind == "doughnut" || kind == "donut" || kind == "radar";
+        if (op.Has("xTitle") && !round) { try { chart.Axes(1).HasTitle = true; chart.Axes(1).AxisTitle.Text = op.Need("xTitle"); } catch (Exception) { } }
+        if (op.Has("yTitle") && !round) { try { chart.Axes(2).HasTitle = true; chart.Axes(2).AxisTitle.Text = op.Need("yTitle"); } catch (Exception) { } }
+        if (op.Has("y2Title")) { try { chart.Axes(2, 2).HasTitle = true; chart.Axes(2, 2).AxisTitle.Text = op.Need("y2Title"); } catch (Exception) { } }
+        if (op.Has("numberFormat")) { try { chart.Axes(2).TickLabels.NumberFormat = op.Need("numberFormat"); } catch (Exception) { } }
+        if (op.Has("min")) { try { chart.Axes(2).MinimumScale = op.Num("min", 0); } catch (Exception) { } }
+        if (op.Has("max")) { try { chart.Axes(2).MaximumScale = op.Num("max", 0); } catch (Exception) { } }
+        if (op.Has("labels") || (fresh && kind != null && (kind == "pie" || kind == "doughnut" || kind == "donut")))
+        {
+            bool on = !op.Has("labels") || op.On("labels") || op.Str("labels", "") == "percent" || op.Str("labels", "") == "value";
+            try
+            {
+                foreach (dynamic one in chart.SeriesCollection())
+                {
+                    one.HasDataLabels = on;
+                    if (!on) continue;
+                    string what = op.Str("labels", "");
+                    if (what == "percent" || (round && what != "value")) { one.DataLabels().ShowPercentage = true; one.DataLabels().ShowValue = false; one.DataLabels().ShowCategoryName = kind != null && kind != "radar"; }
+                    try { one.DataLabels().Font.Size = 9; } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+        if (op.Has("legend") || fresh)
+        {
+            string legend = op.Str("legend", null);
+            int count = 0;
+            try { count = (int)chart.SeriesCollection().Count; } catch (Exception) { }
+            if (legend == null) legend = round ? "right" : count > 1 ? "bottom" : "none";
+            try
+            {
+                chart.HasLegend = legend != "none" && legend != "false";
+                if (Truthy(chart.HasLegend)) chart.Legend.Position = legend == "right" ? -4152 : legend == "top" ? -4160 : legend == "left" ? -4131 : -4107;
+            }
+            catch (Exception) { }
+        }
+        if (fresh)
+        {
+            // A plain, readable look: one typeface, pale grid lines, bars that are not thin.
+            try { chart.ChartArea.Font.Name = "Microsoft YaHei"; chart.ChartArea.Font.Size = 10; } catch (Exception) { }
+            try { chart.Axes(2).MajorGridlines.Format.Line.ForeColor.RGB = Bgr("#E4E6EA"); } catch (Exception) { }
+            try { if (kind == "column" || kind == "bar" || kind == "combo" || kind == "stacked" || kind == "stacked bar") chart.ChartGroups(1).GapWidth = 80; } catch (Exception) { }
+            try { chart.ChartArea.Format.Line.Visible = 0; } catch (Exception) { }
+        }
+        if (op.Has("at")) { dynamic anchor = Cells(ws, op.Need("at")); holder.Left = (double)anchor.Left; holder.Top = (double)anchor.Top; }
+        if (op.Has("width")) holder.Width = op.Num("width", 420);
+        if (op.Has("height")) holder.Height = op.Num("height", 260);
+        if (op.Has("name")) holder.Name = op.Need("name");
+        int total = 0, points = 0;
+        try { total = (int)chart.SeriesCollection().Count; if (total > 0) points = ((Array)chart.SeriesCollection(1).Values).Length; } catch (Exception) { }
+        string where = "";
+        try { where = " at " + (string)holder.TopLeftCell.Address[false, false] + ":" + (string)holder.BottomRightCell.Address[false, false]; } catch (Exception) { }
+        // Data taken from a pivot table makes a pivot chart: it shows every value of that table and carries field buttons.
+        try
+        {
+            if (chart.PivotLayout != null)
+            {
+                try { chart.ShowAllFieldButtons = false; } catch (Exception) { }
+                where += " (its data is a pivot table, so it shows all values of that table and follows its filters; to chart only some of them, write them to plain cells first)";
+            }
+        }
+        catch (Exception) { }
+        // Charts lying over one another is the commonest fault of a dashboard: say so at once.
+        try
+        {
+            double l = (double)holder.Left, t = (double)holder.Top, r = l + (double)holder.Width, b = t + (double)holder.Height;
+            foreach (dynamic other in ws.ChartObjects())
+            {
+                if ((string)other.Name == (string)holder.Name) continue;
+                double ol = (double)other.Left, ot = (double)other.Top, or = ol + (double)other.Width, ob = ot + (double)other.Height;
+                if (l < or - 2 && ol < r - 2 && t < ob - 2 && ot < b - 2) { where += " — it OVERLAPS chart \"" + (string)other.Name + "\" (" + (string)other.TopLeftCell.Address[false, false] + ":" + (string)other.BottomRightCell.Address[false, false] + "): move one with set_chart {chart, at}"; break; }
+            }
+        }
+        catch (Exception) { }
+        return "chart \"" + (string)holder.Name + "\" " + (fresh ? "added" : "changed") + " on \"" + (string)ws.Name + "\"" + where + ": " + total + " series" + (points > 0 ? " × " + points + " point(s)" : "") + (total == 0 ? " — NOTHING is plotted: check the range" : "");
+    }
+
+    static dynamic ChartByName(dynamic ws, string name)
+    {
+        List<string> names = new List<string>();
+        foreach (dynamic holder in ws.ChartObjects())
+        {
+            if (string.Equals((string)holder.Name, name, StringComparison.OrdinalIgnoreCase)) return holder;
+            names.Add("\"" + (string)holder.Name + "\"");
+        }
+        int index;
+        if (int.TryParse(name, out index) && index >= 1 && index <= names.Count) return ws.ChartObjects(index);
+        throw new Fail("ANCHOR_MISSING", "Sheet \"" + (string)ws.Name + "\" has no chart \"" + name + "\". Charts: " + (names.Count == 0 ? "none" : string.Join(", ", names.ToArray())) + ".");
+    }
+
+    static bool Test(object value, string how, object against, IList among)
+    {
+        string text = Tidy(Text(value));
+        switch (how)
+        {
+            case "blank": return IsBlank(value);
+            case "notblank": case "not blank": return !IsBlank(value);
+            case "contains": return text.IndexOf(Text(against), StringComparison.OrdinalIgnoreCase) >= 0;
+            case "in":
+                if (among != null) foreach (object one in among) if (string.Equals(text, Tidy(Text(one)), StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            case "text": return value is string && !IsBlank(value);
+            case "error": return value is int && CellValue(value) is string;
+        }
+        if (IsBlank(value)) return false;
+        double a = 0, b = 0;
+        bool left = true, right = true;
+        if (IsNumber(value)) a = Convert.ToDouble(value); else left = ParseNumber(text, out a);
+        if (IsNumber(against)) b = Convert.ToDouble(against); else right = ParseNumber(Text(against), out b);
+        bool numbers = left && right;
+        int order = numbers ? a.CompareTo(b) : string.Compare(text, Tidy(Text(against)), StringComparison.OrdinalIgnoreCase);
+        switch (how)
+        {
+            case "=": case "==": case "equals": return order == 0;
+            case "<>": case "!=": return order != 0;
+            case ">": return numbers && order > 0;
+            case "<": return numbers && order < 0;
+            case ">=": return numbers && order >= 0;
+            case "<=": return numbers && order <= 0;
+        }
+        throw new Fail("BAD_ARGS", "Unknown test \"" + how + "\": use blank, notblank, =, <>, >, <, >=, <=, contains, in, text or error.");
+    }
+
+    /// The operations for working with data. Returns null for an operation that is not one of them.
+    static string ExcelData(dynamic app, dynamic book, dynamic ws, string type, Bag op)
+    {
+        if (type == "sort")
+        {
+            dynamic data = Data(ws, op);
+            IList by = op.List("by");
+            if (by == null) { by = new ArrayList(); by.Add(new Dictionary<string, object> { { "column", op.Raw("column") }, { "order", op.Str("order", "asc") } }); }
+            dynamic sort = ws.Sort;
+            sort.SortFields.Clear();
+            List<string> said = new List<string>();
+            foreach (object raw in by)
+            {
+                Bag key = raw is string ? new Bag(new Dictionary<string, object> { { "column", raw } }) : new Bag(raw);
+                int c = Col(data, key.Raw("column"));
+                bool down = key.Str("order", "asc").StartsWith("d", StringComparison.OrdinalIgnoreCase);
+                dynamic column = data.Columns[c];
+                sort.SortFields.Add(Key: column, SortOn: 0, Order: down ? 2 : 1, DataOption: 0);
+                said.Add(Headers(data)[c - 1] + (down ? " ↓" : " ↑"));
+            }
+            sort.SetRange(data);
+            sort.Header = op.Flag("header", true) ? 1 : 2;
+            sort.Apply();
+            return "sorted " + (string)data.Address[false, false] + " by " + string.Join(", ", said.ToArray());
+        }
+        if (type == "filter")
+        {
+            dynamic data = Data(ws, op);
+            int c = Col(data, op.Raw("column"));
+            IList values = op.List("values");
+            if (values != null)
+            {
+                string[] wanted = new string[values.Count];
+                for (int i = 0; i < values.Count; i++) wanted[i] = Text(values[i]);
+                data.AutoFilter(Field: c, Criteria1: wanted, Operator: 7);
+            }
+            else if (op.Has("criteria2")) data.AutoFilter(Field: c, Criteria1: op.Need("criteria"), Operator: op.Str("join", "and") == "or" ? 2 : 1, Criteria2: op.Need("criteria2"));
+            else data.AutoFilter(Field: c, Criteria1: op.Need("criteria"));
+            int shown = 0;
+            try { shown = (int)data.Columns[1].SpecialCells(12).Cells.Count - 1; } catch (Exception) { }
+            return "filter on \"" + Headers(data)[c - 1] + "\": " + shown + " of " + ((int)data.Rows.Count - 1) + " row(s) shown (the others are hidden, not deleted; clear_filter shows all)";
+        }
+        if (type == "clear_filter")
+        {
+            try { if (Truthy(ws.FilterMode)) ws.ShowAllData(); } catch (Exception) { }
+            if (!op.Flag("keepArrows", false)) { try { ws.AutoFilterMode = false; } catch (Exception) { } }
+            return "all rows shown";
+        }
+        if (type == "remove_duplicates")
+        {
+            dynamic data = Data(ws, op);
+            object[,] grid = Grid(data);
+            List<int> keys = Cols(data, op, true);
+            Dictionary<string, int> seen = new Dictionary<string, int>();
+            List<int> gone = new List<int>();
+            int row0 = (int)data.Row;
+            for (int r = 2; r <= grid.GetLength(0); r++)
+            {
+                StringBuilder key = new StringBuilder();
+                bool any = false;
+                foreach (int c in keys) { if (!IsBlank(grid[r, c])) any = true; key.Append(Tidy(Text(grid[r, c])).ToUpperInvariant()).Append('\u0001'); }
+                if (!any) continue;
+                string k = key.ToString();
+                if (seen.ContainsKey(k)) gone.Add(row0 + r - 1); else seen[k] = r;
+            }
+            string what = keys.Count == grid.GetLength(1) ? "whole rows" : "the same " + string.Join(" + ", keys.ConvertAll<string>(delegate(int c) { return Headers(data)[c - 1]; }).ToArray());
+            if (gone.Count == 0) return "no duplicates (" + what + ")";
+            string list = RowList(gone);
+            DeleteRows(ws, gone);
+            return "removed " + gone.Count + " duplicate row(s) (" + what + "; the first of each kept): rows " + list + ". Row numbers below them have changed";
+        }
+        if (type == "delete_rows" && (op.Has("where") || op.Has("blank")))
+        {
+            dynamic data = Data(ws, op);
+            object[,] grid = Grid(data);
+            int row0 = (int)data.Row, cols = grid.GetLength(1);
+            List<int> gone = new List<int>();
+            string said;
+            if (op.Has("where"))
+            {
+                Bag where = new Bag(op.Raw("where"));
+                int c = Col(data, where.Raw("column"));
+                string how = where.Str("is", where.Str("op", where.Has("value") ? "=" : "blank"));
+                object against = where.Raw("value");
+                IList among = where.List("values");
+                if (among != null && !where.Has("is") && !where.Has("op")) how = "in";
+                for (int r = 2; r <= grid.GetLength(0); r++) if (Test(grid[r, c], how, against, among)) gone.Add(row0 + r - 1);
+                said = "\"" + Headers(data)[c - 1] + "\" " + how + (against != null ? " " + Text(against) : among != null ? " [" + among.Count + " values]" : "");
+            }
+            else
+            {
+                for (int r = 2; r <= grid.GetLength(0); r++)
+                {
+                    bool any = false;
+                    for (int c = 1; c <= cols; c++) if (!IsBlank(grid[r, c])) { any = true; break; }
+                    if (!any) gone.Add(row0 + r - 1);
+                }
+                said = "entirely empty";
+            }
+            if (gone.Count == 0) return "no row is " + said + ": nothing deleted";
+            string list = RowList(gone);
+            DeleteRows(ws, gone);
+            return "deleted " + gone.Count + " row(s) where " + said + ": rows " + list + ". Row numbers below them have changed";
+        }
+        if (type == "replace")
+        {
+            dynamic data = Data(ws, op);
+            List<int> only = Cols(data, op, false);
+            dynamic target = only.Count == 1 ? data.Columns[only[0]] : data;
+            string find = op.Need("find"), with = op.Str("replace", op.Str("with", ""));
+            bool whole = op.Flag("whole", false), matchCase = op.Flag("matchCase", false);
+            int count = 0;
+            object[,] grid = Grid(target);
+            foreach (object v in grid)
+            {
+                string s = v as string;
+                if (s == null) continue;
+                if (whole ? string.Equals(s, find, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) : s.IndexOf(find, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) >= 0) count++;
+            }
+            if (count == 0) return "\"" + find + "\" does not occur in " + (string)target.Address[false, false] + ": nothing replaced";
+            target.Replace(What: find.Replace("~", "~~").Replace("*", "~*").Replace("?", "~?"), Replacement: with, LookAt: whole ? 1 : 2, MatchCase: matchCase);
+            return "replaced in " + count + " cell(s) of " + (string)target.Address[false, false];
+        }
+        if (type == "clean")
+        {
+            dynamic data = Data(ws, op);
+            List<int> columns = Cols(data, op, !op.Has("to") && !op.Has("map") && !op.Has("case") && !op.Has("remove"));
+            if (columns.Count == 0) throw new Fail("BAD_ARGS", "clean needs \"column\" or \"columns\" when it converts, maps, changes case or removes text.");
+            string to = op.Str("to", null), casing = op.Str("case", null);
+            bool trim = op.Flag("trim", true), noSpaces = op.Flag("noSpaces", false);
+            IList remove = op.List("remove");
+            if (remove == null && op.Has("remove")) { remove = new ArrayList(); remove.Add(op.Need("remove")); }
+            Dictionary<string, object> map = op.Raw("map") as Dictionary<string, object>;
+            Dictionary<string, object> lookup = null;
+            if (map != null)
+            {
+                lookup = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                foreach (KeyValuePair<string, object> pair in map) lookup[Tidy(pair.Key)] = pair.Value;
+            }
+            int year = op.Int("year", 0);
+            object[,] grid = Grid(data);
+            int rows = grid.GetLength(0), row0 = (int)data.Row, col0 = (int)data.Column;
+            List<string> said = new List<string>();
+            foreach (int c in columns)
+            {
+                dynamic column = data.Columns[c];
+                bool formulas = true;
+                try { object has = column.HasFormula; formulas = !(has is bool) || (bool)has; } catch (Exception) { }
+                if (to == "date" && year == 0)
+                {
+                    // Dates given without a year take the year the rest of the column is in.
+                    Dictionary<int, int> years = new Dictionary<int, int>();
+                    for (int r = 2; r <= rows; r++)
+                    {
+                        DateTime known = DateTime.MinValue;
+                        object v = grid[r, c];
+                        if (IsNumber(v)) { try { known = DateTime.FromOADate(Convert.ToDouble(v)); } catch (Exception) { } }
+                        else if (v is string && !System.Text.RegularExpressions.Regex.IsMatch(Tidy((string)v), "^\\d{1,2}\\s*[-/.月]")) ParseDate((string)v, 1, out known);
+                        if (known.Year > 1900) { int n; years[known.Year] = years.TryGetValue(known.Year, out n) ? n + 1 : 1; }
+                    }
+                    int best = 0;
+                    foreach (KeyValuePair<int, int> pair in years) if (pair.Value > best) { best = pair.Value; year = pair.Key; }
+                    if (year == 0) year = DateTime.Now.Year;
+                }
+                int changed = 0, failed = 0;
+                List<string> samples = new List<string>();
+                object[,] fresh = (object[,])Array.CreateInstance(typeof(object), new int[] { rows, 1 }, new int[] { 1, 1 });
+                fresh[1, 1] = grid[1, c];
+                for (int r = 2; r <= rows; r++)
+                {
+                    object before = grid[r, c], after = before;
+                    string s = before as string;
+                    if (s != null)
+                    {
+                        if (trim) s = Tidy(s);
+                        if (noSpaces) s = s.Replace(" ", "");
+                        if (remove != null) foreach (object piece in remove) { string cut = Text(piece); if (cut.Length > 0) s = s.Replace(cut, ""); }
+                        if (trim) s = s.Trim();
+                        if (casing == "upper") s = s.ToUpperInvariant();
+                        else if (casing == "lower") s = s.ToLowerInvariant();
+                        else if (casing == "proper") s = System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(s.ToLowerInvariant());
+                        after = s.Length == 0 ? null : (object)s;
+                        object mapped;
+                        if (lookup != null && lookup.TryGetValue(s, out mapped)) { after = Scalar(mapped); s = after as string; }
+                        if (s != null && s.Length > 0)
+                        {
+                            double number; DateTime date;
+                            if (to == "number") { if (ParseNumber(s, out number)) after = number; else { failed++; if (samples.Count < 5) samples.Add(Column(col0 + c - 1) + (row0 + r - 1) + " \"" + Clip(s, 16) + "\""); } }
+                            else if (to == "date") { if (ParseDate(s, year, out date)) after = date.ToOADate(); else { failed++; if (samples.Count < 5) samples.Add(Column(col0 + c - 1) + (row0 + r - 1) + " \"" + Clip(s, 16) + "\""); } }
+                        }
+                    }
+                    else if (before != null && to == "text") after = Text(before);
+                    else if (to == "date" && IsNumber(before) && Convert.ToDouble(before) >= 19000101 && Convert.ToDouble(before) <= 22001231)
+                    {
+                        DateTime date;
+                        if (ParseDate(Convert.ToInt64(Convert.ToDouble(before)).ToString(), year, out date)) after = date.ToOADate();
+                        else { failed++; if (samples.Count < 5) samples.Add(Column(col0 + c - 1) + (row0 + r - 1) + " " + Text(before)); }
+                    }
+                    else if (before != null && lookup != null) { object mapped; if (lookup.TryGetValue(Text(before), out mapped)) after = Scalar(mapped); }
+                    fresh[r, 1] = after;
+                    if (!object.Equals(before, after)) changed++;
+                }
+                if (changed > 0)
+                {
+                    if (!formulas)
+                    {
+                        if (to == "text") column.NumberFormat = "@";
+                        column.Value2 = fresh;
+                    }
+                    else
+                    {
+                        // Formulas stand in this column: only the plain cells that changed are written.
+                        for (int r = 2; r <= rows; r++)
+                        {
+                            if (object.Equals(grid[r, c], fresh[r, 1])) continue;
+                            dynamic cell = column.Cells[r, 1];
+                            if (Truthy(cell.HasFormula)) continue;
+                            cell.Value2 = fresh[r, 1];
+                        }
+                    }
+                }
+                if (to == "date") { try { data.Columns[c].Offset[1, 0].Resize[Math.Max(1, rows - 1), 1].NumberFormat = op.Str("numberFormat", "yyyy-mm-dd"); } catch (Exception) { } }
+                else if (to == "number" && op.Has("numberFormat")) { try { data.Columns[c].Offset[1, 0].Resize[Math.Max(1, rows - 1), 1].NumberFormat = op.Need("numberFormat"); } catch (Exception) { } }
+                // What the column holds now, when it is a handful of values: the check that the cleaning worked.
+                Dictionary<string, int> seen = new Dictionary<string, int>();
+                bool few = true;
+                for (int r = 2; r <= rows && few; r++)
+                {
+                    if (IsBlank(fresh[r, 1])) continue;
+                    string shown = Text(fresh[r, 1]);
+                    int n;
+                    seen[shown] = seen.TryGetValue(shown, out n) ? n + 1 : 1;
+                    if (seen.Count > 16) few = false;
+                }
+                string now = "";
+                if (few && seen.Count > 0 && to != "number" && to != "date")
+                {
+                    List<string> parts = new List<string>();
+                    foreach (KeyValuePair<string, int> pair in seen) parts.Add("\"" + Clip(pair.Key, 20) + "\" " + pair.Value);
+                    now = "; values now: " + string.Join(", ", parts.ToArray());
+                }
+                said.Add("\"" + Text(grid[1, c]).Trim() + "\": " + changed + " cell(s) changed" + (failed > 0 ? ", " + failed + " could NOT be read as a " + to + " and were left (" + string.Join(", ", samples.ToArray()) + (failed > samples.Count ? ", .." : "") + ")" : "") + now);
+            }
+            return "cleaned " + string.Join("; ", said.ToArray());
+        }
+        if (type == "fill_blanks")
+        {
+            dynamic data = Data(ws, op);
+            List<int> columns = Cols(data, op, false);
+            if (columns.Count == 0) throw new Fail("BAD_ARGS", "fill_blanks needs \"column\" or \"columns\".");
+            object with = op.Raw("with");
+            if (with == null) throw new Fail("BAD_ARGS", "fill_blanks needs \"with\": a value, or \"above\", \"mean\", \"median\", \"mode\".");
+            object[,] grid = Grid(data);
+            int rows = grid.GetLength(0);
+            List<string> said = new List<string>();
+            foreach (int c in columns)
+            {
+                object fill = Scalar(with);
+                string how = with as string;
+                if (how == "mean" || how == "median" || how == "mode")
+                {
+                    List<double> numbers = new List<double>();
+                    Dictionary<string, int> seen = new Dictionary<string, int>();
+                    object commonest = null;
+                    int most = 0;
+                    for (int r = 2; r <= rows; r++)
+                    {
+                        if (IsBlank(grid[r, c])) continue;
+                        if (IsNumber(grid[r, c])) numbers.Add(Convert.ToDouble(grid[r, c]));
+                        int n;
+                        string key = Text(grid[r, c]);
+                        seen[key] = seen.TryGetValue(key, out n) ? n + 1 : 1;
+                        if (seen[key] > most) { most = seen[key]; commonest = grid[r, c]; }
+                    }
+                    if (how == "mode") fill = commonest;
+                    else
+                    {
+                        if (numbers.Count == 0) throw new Fail("BAD_ARGS", "Column \"" + Text(grid[1, c]) + "\" has no numbers to take the " + how + " of.");
+                        numbers.Sort();
+                        double sum = 0;
+                        foreach (double n in numbers) sum += n;
+                        fill = how == "mean" ? Math.Round(sum / numbers.Count, 4) : numbers.Count % 2 == 1 ? numbers[numbers.Count / 2] : (numbers[numbers.Count / 2 - 1] + numbers[numbers.Count / 2]) / 2;
+                    }
+                }
+                int filled = 0;
+                object last = null;
+                dynamic column = data.Columns[c];
+                for (int r = 2; r <= rows; r++)
+                {
+                    if (!IsBlank(grid[r, c])) { last = grid[r, c]; continue; }
+                    object value = how == "above" ? last : fill;
+                    if (value == null) continue;
+                    column.Cells[r, 1].Value2 = value;
+                    filled++;
+                }
+                said.Add("\"" + Text(grid[1, c]).Trim() + "\": " + filled + " blank(s) filled" + (how == "above" ? " from the cell above" : " with " + Text(fill)));
+            }
+            return string.Join("; ", said.ToArray());
+        }
+        if (type == "fill_formula")
+        {
+            dynamic target = Cells(ws, op.Need("range"));
+            string formula = op.Need("formula");
+            if (!formula.StartsWith("=", StringComparison.Ordinal)) formula = "=" + formula;
+            Show(book, ws, target);
+            target.Formula = formula;
+            ExcelFormat(target, op);
+            return "formula filled into " + (string)target.Address[false, false] + " (written for its first cell, adjusted for the others)" + Errors(target);
+        }
+        if (type == "add_column")
+        {
+            dynamic data = Data(ws, op);
+            int rows = (int)data.Rows.Count, cols = (int)data.Columns.Count;
+            string header = op.Need("header");
+            // A column of that name is filled again, not added twice.
+            int at = cols + 1;
+            List<string> heads = Headers(data);
+            for (int c = 0; c < heads.Count; c++) if (string.Equals(heads[c], header, StringComparison.OrdinalIgnoreCase)) at = c + 1;
+            if (op.Has("after") && at == cols + 1)
+            {
+                at = Col(data, op.Raw("after")) + 1;
+                data.Columns[at].EntireColumn.Insert();
+                data = data.Resize[rows, cols + 1];
+            }
+            dynamic head = data.Cells[1, at];
+            head.Value2 = header;
+            try { head.Font.Bold = data.Cells[1, 1].Font.Bold; } catch (Exception) { }
+            string where = Column((int)head.Column);
+            if (rows < 2) return "column " + where + " \"" + header + "\" added (no data rows to fill)";
+            dynamic body = data.Cells[2, at].Resize[rows - 1, 1];
+            Show(book, ws, body);
+            if (op.Has("formula"))
+            {
+                string formula = op.Need("formula");
+                if (!formula.StartsWith("=", StringComparison.Ordinal)) formula = "=" + formula;
+                body.Formula = formula;
+            }
+            else if (op.Has("value")) body.Value2 = Scalar(op.Raw("value"));
+            ExcelFormat(body, op);
+            if (op.Flag("values", false)) body.Value2 = body.Value2;
+            return "column " + where + " \"" + header + "\" " + (at <= cols && !op.Has("after") ? "filled" : "added") + ": " + (string)body.Address[false, false] + Errors(body);
+        }
+        if (type == "insert_columns" || type == "delete_columns")
+        {
+            string at = op.Need("column");
+            int count = Math.Max(1, op.Int("count", 1));
+            dynamic first;
+            try { first = ws.Range[at + "1"]; } catch (COMException) { throw new Fail("BAD_ARGS", "\"column\" must be a column letter, e.g. \"C\"."); }
+            dynamic columns = first.Resize[1, count].EntireColumn;
+            if (type == "insert_columns") columns.Insert(); else columns.Delete();
+            return (type == "insert_columns" ? "inserted " : "deleted ") + count + " column(s) at " + at;
+        }
+        if (type == "copy_range")
+        {
+            dynamic source = Ref(book, ws, op.Need("range"));
+            dynamic target = Ref(book, ws, op.Need("to"));
+            if (op.Flag("values", false))
+            {
+                dynamic into = target.Cells[1, 1].Resize[(int)source.Rows.Count, (int)source.Columns.Count];
+                // Writing the values over would make Excel read every text again ("20250301" would turn into a
+                // number): its own copy keeps each cell as it is, and only the formulas are then replaced by results.
+                source.Copy(into.Cells[1, 1]);
+                try { app.CutCopyMode = 0; } catch (Exception) { }
+                try
+                {
+                    dynamic formulas = into.SpecialCells(-4123);
+                    foreach (dynamic area in formulas.Areas) area.Value2 = area.Value2;
+                }
+                catch (COMException) { }
+                for (int c = 1; c <= (int)source.Columns.Count; c++) { try { into.Columns[c].ColumnWidth = source.Columns[c].ColumnWidth; } catch (Exception) { } }
+                return "values of " + (string)source.Address[false, false] + " copied to " + (string)into.Worksheet.Name + "!" + (string)into.Address[false, false];
+            }
+            // Excel's own copy takes formulas and formats along; it goes through nothing the user owns.
+            source.Copy(target.Cells[1, 1]);
+            try { app.CutCopyMode = 0; } catch (Exception) { }
+            return (string)source.Address[false, false] + " copied to " + (string)target.Worksheet.Name + "!" + (string)target.Cells[1, 1].Address[false, false];
+        }
+        if (type == "pivot")
+        {
+            dynamic source = op.Has("source") ? Ref(book, ws, op.Need("source")) : ws.UsedRange;
+            List<string> heads = Headers(source);
+            for (int c = 0; c < heads.Count; c++) if (heads[c].Length == 0) throw new Fail("BAD_ARGS", "The source " + (string)source.Address[false, false] + " has an empty header in column " + Column((int)source.Column + c) + ": a pivot table needs a name over every column.");
+            dynamic target;
+            if (op.Has("to")) target = Ref(book, ws, op.Need("to")).Cells[1, 1];
+            else
+            {
+                dynamic sheets = book.Worksheets;
+                dynamic made = sheets.Add(After: sheets[(int)sheets.Count]);
+                string wanted = op.Str("name", "透视表");
+                try { made.Name = wanted; } catch (COMException) { }
+                target = made.Range["A3"];
+            }
+            dynamic cache = book.PivotCaches().Create(SourceType: 1, SourceData: source);
+            dynamic table = cache.CreatePivotTable(TableDestination: target);
+            if (op.Has("name")) { try { table.Name = op.Need("name"); } catch (Exception) { } }
+            Func<object, string> field = delegate(object key)
+            {
+                string name = Text(key).Trim();
+                foreach (string head in heads) if (string.Equals(head, name, StringComparison.OrdinalIgnoreCase)) return head;
+                throw new Fail("ANCHOR_MISSING", "The source has no column \"" + name + "\". Its headers: " + string.Join(", ", heads.ToArray()) + ".");
+            };
+            List<string> notes = new List<string>();
+            int position = 0;
+            foreach (object key in op.List("rows") ?? new ArrayList()) { dynamic f = table.PivotFields(field(key)); f.Orientation = 1; f.Position = ++position; }
+            position = 0;
+            foreach (object key in op.List("columns") ?? new ArrayList()) { dynamic f = table.PivotFields(field(key)); f.Orientation = 2; f.Position = ++position; }
+            foreach (object key in op.List("filters") ?? new ArrayList()) { dynamic f = table.PivotFields(field(key)); f.Orientation = 3; }
+            IList values = op.List("values");
+            if (values == null || values.Count == 0) throw new Fail("BAD_ARGS", "pivot needs \"values\": [{field, fn?: sum|count|average|max|min, name?}].");
+            foreach (object raw in values)
+            {
+                Bag item = raw is string ? new Bag(new Dictionary<string, object> { { "field", raw } }) : new Bag(raw);
+                string name = field(item.Raw("field")), fn = item.Str("fn", "sum").ToLowerInvariant();
+                int code = fn == "count" ? -4112 : fn == "average" || fn == "mean" || fn == "avg" ? -4106 : fn == "max" ? -4136 : fn == "min" ? -4139 : -4157;
+                string caption = item.Str("name", (fn == "count" ? "计数：" : fn.StartsWith("a", StringComparison.Ordinal) || fn == "mean" ? "平均：" : fn == "max" ? "最大：" : fn == "min" ? "最小：" : "合计：") + name);
+                dynamic data = table.AddDataField(table.PivotFields(name), caption, code);
+                if (item.Has("numberFormat")) { try { data.NumberFormat = item.Need("numberFormat"); } catch (Exception) { } }
+                else if (fn != "count") { try { data.NumberFormat = "#,##0.00"; } catch (Exception) { } }
+            }
+            if (op.Has("group"))
+            {
+                // Dates on the rows or columns, gathered by month, quarter or year.
+                Bag group = new Bag(op.Raw("group"));
+                string by = group.Str("by", "month");
+                try
+                {
+                    dynamic f = table.PivotFields(field(group.Raw("field")));
+                    dynamic cell = f.DataRange.Cells[1, 1];
+                    object[] periods = new object[] { false, false, false, false, by == "month", by == "quarter", by == "year" };
+                    cell.Group(Start: true, End: true, Periods: periods);
+                }
+                catch (Exception error)
+                {
+                    notes.Add("the dates could not be grouped by " + by + " (" + error.Message.Trim() + "): the column must hold real dates only; or add a month column with a formula and pivot on that");
+                }
+            }
+            if (op.Has("sort"))
+            {
+                Bag sort = new Bag(op.Raw("sort"));
+                try
+                {
+                    dynamic f = table.PivotFields(field(sort.Raw("field")));
+                    string byName = sort.Has("by") ? sort.Need("by") : (string)table.DataFields[1].Name;
+                    f.AutoSort(sort.Str("order", "desc").StartsWith("d", StringComparison.OrdinalIgnoreCase) ? 2 : 1, byName);
+                }
+                catch (Exception) { notes.Add("the sort was not applied: \"by\" must be the name of a value as it is shown in the table"); }
+            }
+            try { table.RowAxisLayout(1); } catch (Exception) { }
+            dynamic made2 = table.TableRange1;
+            dynamic home = made2.Worksheet;
+            try { made2.EntireColumn.AutoFit(); } catch (Exception) { }
+            // The result, so that it need not be read again.
+            object[,] grid = Grid(made2);
+            StringBuilder shown = new StringBuilder();
+            int limit = Math.Min(grid.GetLength(0), 40);
+            for (int r = 1; r <= limit; r++)
+            {
+                List<string> cells = new List<string>();
+                for (int c = 1; c <= Math.Min(grid.GetLength(1), 14); c++)
+                {
+                    object v = grid[r, c];
+                    cells.Add(IsNumber(v) ? Plain(Math.Round(Convert.ToDouble(v), 2)) : Text(v));
+                }
+                shown.Append("\n").Append((int)made2.Row + r - 1).Append(": ").Append(string.Join(" | ", cells.ToArray()));
+            }
+            return "pivot table \"" + (string)table.Name + "\" at " + (string)home.Name + "!" + (string)made2.Address[false, false] + (notes.Count > 0 ? " — NOTE " + string.Join("; ", notes.ToArray()) : "") + ":" + shown + (grid.GetLength(0) > limit ? "\n.. (" + (grid.GetLength(0) - limit) + " more rows)" : "");
+        }
+        if (type == "table")
+        {
+            dynamic data = Data(ws, op);
+            dynamic table = ws.ListObjects.Add(1, data, Type.Missing, 1);
+            if (op.Has("name")) { try { table.Name = op.Need("name"); } catch (Exception) { } }
+            try { table.TableStyle = op.Str("style", "TableStyleMedium2"); } catch (Exception) { }
+            return "table \"" + (string)table.Name + "\" made of " + (string)data.Address[false, false] + " (banded rows, filter arrows, formulas may use its column names)";
+        }
+        if (type == "conditional_format")
+        {
+            dynamic target = Cells(ws, op.Need("range"));
+            string rule = op.Str("rule", ">").ToLowerInvariant();
+            if (rule == "clear" || rule == "none") { target.FormatConditions.Delete(); return "conditional formats cleared"; }
+            dynamic made = null;
+            Func<string, string> eq = delegate(string key) { string v = Text(op.Raw(key)); return v.StartsWith("=", StringComparison.Ordinal) ? v : IsNumber(op.Raw(key)) ? "=" + v : "=\"" + v.Replace("\"", "\"\"") + "\""; };
+            if (rule == "colorscale" || rule == "color scale") { target.FormatConditions.AddColorScale(3); return "colour scale on " + (string)target.Address[false, false]; }
+            if (rule == "databar" || rule == "data bar") { target.FormatConditions.AddDatabar(); return "data bars on " + (string)target.Address[false, false]; }
+            if (rule == "duplicate" || rule == "unique") { made = target.FormatConditions.AddUniqueValues(); made.DupeUnique = rule == "duplicate" ? 1 : 0; }
+            else if (rule == "top" || rule == "bottom") { made = target.FormatConditions.AddTop10(); made.TopBottom = rule == "top" ? 1 : 0; made.Rank = Math.Max(1, op.Int("value", 10)); }
+            else if (rule == "formula") made = target.FormatConditions.Add(Type: 2, Formula1: eq("value"));
+            else if (rule == "blank") made = target.FormatConditions.Add(Type: 10);
+            else
+            {
+                int code = rule == "between" ? 1 : rule == "=" ? 3 : rule == "<>" ? 4 : rule == ">" ? 5 : rule == "<" ? 6 : rule == ">=" ? 7 : rule == "<=" ? 8 : 0;
+                if (code == 0) throw new Fail("BAD_ARGS", "Unknown rule \"" + rule + "\": use >, <, >=, <=, =, <>, between, top, bottom, duplicate, unique, blank, formula, colorscale, databar or clear.");
+                if (code == 1) made = target.FormatConditions.Add(Type: 1, Operator: code, Formula1: eq("value"), Formula2: eq("value2"));
+                else made = target.FormatConditions.Add(Type: 1, Operator: code, Formula1: eq("value"));
+            }
+            made.Interior.Color = Bgr(op.Str("fill", "#FFC7CE"));
+            made.Font.Color = Bgr(op.Str("color", "#9C0006"));
+            if (op.Has("bold")) made.Font.Bold = op.Flag("bold", false);
+            return "conditional format on " + (string)target.Address[false, false] + " (" + rule + ")";
+        }
+        if (type == "freeze")
+        {
+            dynamic cell = Cells(ws, op.Str("cell", "A2")).Cells[1, 1];
+            ws.Activate();
+            dynamic window = app.ActiveWindow;
+            window.FreezePanes = false;
+            window.ScrollRow = 1; window.ScrollColumn = 1;
+            window.SplitRow = (int)cell.Row - 1;
+            window.SplitColumn = (int)cell.Column - 1;
+            window.FreezePanes = (int)cell.Row > 1 || (int)cell.Column > 1;
+            return "panes frozen above and left of " + (string)cell.Address[false, false];
+        }
+        if (type == "validation")
+        {
+            dynamic target = Cells(ws, op.Need("range"));
+            IList list = op.List("list");
+            if (list == null) throw new Fail("BAD_ARGS", "validation needs \"list\": the allowed values.");
+            List<string> items = new List<string>();
+            foreach (object item in list) items.Add(Text(item));
+            target.Validation.Delete();
+            target.Validation.Add(Type: 3, AlertStyle: 1, Operator: 1, Formula1: string.Join(",", items.ToArray()));
+            return "cells " + (string)target.Address[false, false] + " take only: " + string.Join(", ", items.ToArray());
+        }
         if (type == "add_chart")
         {
-            dynamic source = Cells(ws, op.Need("range"));
             dynamic anchor = Cells(ws, op.Str("at", "H2"));
-            dynamic holder = ws.ChartObjects().Add((double)anchor.Left, (double)anchor.Top, op.Num("width", 420), op.Num("height", 260));
-            dynamic chart = holder.Chart;
-            chart.SetSourceData(source);
-            string kind = op.Str("chart", "column");
-            chart.ChartType = kind == "bar" ? 57 : kind == "line" ? 65 : kind == "pie" ? 5 : kind == "scatter" ? -4169 : kind == "area" ? 1 : 51;
-            if (op.Has("title")) { chart.HasTitle = true; chart.ChartTitle.Text = op.Need("title"); }
-            if (op.Has("name")) holder.Name = op.Need("name");
-            return "chart \"" + (string)holder.Name + "\" added";
+            op.Raw("at");
+            dynamic holder = null;
+            try
+            {
+                // The way charts are made since Excel 2013: today's colours and type instead of those of 2007.
+                dynamic shape = ws.Shapes.AddChart2(-1, ChartKind(op.Str("type", op.Str("chart", "column"))), (double)anchor.Left, (double)anchor.Top, op.Num("width", 480), op.Num("height", 290));
+                holder = ws.ChartObjects((string)shape.Name);
+            }
+            catch (Fail) { throw; }
+            catch (Exception) { holder = null; }
+            if (holder == null) holder = ws.ChartObjects().Add((double)anchor.Left, (double)anchor.Top, op.Num("width", 480), op.Num("height", 290));
+            try { return Chart(book, ws, holder, op, true); }
+            catch (Exception) { try { holder.Delete(); } catch (Exception) { } throw; }
         }
-        throw new Fail("BAD_ARGS", "Unknown Excel operation \"" + type + "\".");
+        if (type == "set_chart") return Chart(book, ws, ChartByName(ws, op.Need("chart")), op, false);
+        if (type == "delete_chart") { dynamic holder = ChartByName(ws, op.Need("chart")); holder.Delete(); return "chart deleted"; }
+        return null;
     }
 
     // ───────────────────────── PowerPoint ─────────────────────────
@@ -5240,6 +6344,15 @@ static class Program
         else
         {
             dynamic sheet = Sheet(doc, a);
+            if (a.Has("chart"))
+            {
+                dynamic holder = ChartByName(sheet, a.Need("chart"));
+                holder.Chart.Export(path, "PNG");
+                result["what"] = "chart \"" + (string)holder.Name + "\" on " + (string)sheet.Name;
+                result["path"] = path;
+                using (Image made = Image.FromFile(path)) { result["width"] = made.Width; result["height"] = made.Height; }
+                return result;
+            }
             dynamic range = a.Has("range") ? Cells(sheet, a.Need("range")) : sheet.UsedRange;
             // Excel can only hand a picture of cells over through the clipboard: put the user's text back afterwards.
             string text = null;
