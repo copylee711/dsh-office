@@ -90,9 +90,15 @@ const fileName = (doc: string | undefined): string => (doc ?? '').split(/[\\/]/)
 const DOC = { type: 'string', description: 'The open document: its full path or its window name (e.g. report.docx). Default: the document you last opened or worked on.' } as const
 const APP = { type: 'string', enum: ['word', 'excel', 'ppt'], description: 'Only to pick the active document of another app, or when doc has no extension.' } as const
 
-const EDIT_GUIDE = `Edit a document that is open in Word, Excel or PowerPoint, live: each change appears in the window, and the user can keep working in it. Runs ops in order and stops at the first that fails. Does not save (use office_save). Word edits are one undo step for the user; Excel and PowerPoint edits cannot be undone with Ctrl+Z.
+const TAIL = `Colours are "#RRGGBB"; align is left | center | right | justify; file paths are absolute.`
 
-Word ops. para = paragraph number from office_read; pass expect = its first words so a number made stale by other edits is caught. where = after (default with para) | before | start | end (default without para: the very end of the document).
+const EDIT_CORE = `Edit a document that is open in Word, Excel or PowerPoint, live: each change appears in the window, and the user can keep working in it. Runs ops in order and stops at the first that fails. Does not save (use office_save). Word edits are one undo step for the user; Excel and PowerPoint edits cannot be undone with Ctrl+Z.
+Each op is {op: name, ...fields}. The operations of an app and their fields are listed in the result of your first office_open / office_read for that app, and again by office_help {app} at any time: read that list before you write ops, and do not guess names or fields.
+Formulas are LaTeX between dollar signs in any text you write ($...$ in a sentence, $$...$$ on a line of its own) and become native equations. ${TAIL}`
+
+/** The operations of each app. Not sent with every request: handed over when the app is first used, and by office_help. */
+export const GUIDES: Record<AppKind, string> = {
+  word: `Word ops. para = paragraph number from office_read; pass expect = its first words so a number made stale by other edits is caught. where = after (default with para) | before | start | end (default without para: the very end of the document).
 In a form or template whose sections are table cells, write INSIDE the cell: give para = a paragraph of that cell. Without para the text or table lands after everything, outside the form.
 Formulas: write LaTeX between dollar signs in any text (paragraphs, table cells, captions, replace_text): $...$ inside a sentence, $$...$$ as a paragraph of its own. Every symbol, subscript, power, norm or matrix in running text goes between dollar signs too ($\\kappa(A)$, $\\|x\\|_2$, $10^{-8}$, \\begin{pmatrix}..\\end{pmatrix}, \\begin{cases}..\\end{cases}); do not type them with Unicode characters such as ‖x‖₂ or κ₂. Number a display formula when the document numbers its formulas by ending it with \\tag{1}: $$T=2\\pi\\sqrt{l/g} \\tag{1}$$ puts (1) flush right. They become native Word equations; Word itself reads the LaTeX, so ordinary LaTeX works as you would write it (\\mathfrak, \\mathcal, \\bigoplus, \\cong, \\operatorname, \\not\\equiv, matrices, cases, aligned ...) — there is no need to try symbols out first. Never write a formula as plain text such as T = 2π√(l/g).
 - insert_paragraphs {items:[{text, style?}], para?, expect?, where?} — style: Normal, Title, Heading 1..6, List Bullet, List Number, Quote, or a style name the document has. Without style a paragraph is body text in the font, size and spacing of the text it is placed next to. A newline in text starts another paragraph. Items also take the format_text fields.
@@ -108,24 +114,25 @@ Formulas: write LaTeX between dollar signs in any text (paragraphs, table cells,
 - Tables, pictures, their size and their borders are all done with these operations; do not use the mouse for them.
 - Citations: write \\cite{1}, \\cite{2,5} or \\cite{3-6} in the text where the source is used; they become superscript [1] that jump to the reference. List the sources with insert_references {items:["Author. Title[M]. ...", ..], para?, where?} (numbered [1], [2].. in order; put it under a "参考文献" heading). A [1] typed by hand in the text, and a reference list typed as "[1] ..." paragraphs, are converted the same way.
 - style_format {style, font?, latinFont?, size?, bold?, italic?, color?, align?, indentChars?, firstLineIndent?, spaceBefore?, spaceAfter?, lineSpacing? (1.5 | "20pt" | "at least 20pt"), pageBreakBefore?, numbering?: false} — change what a style looks like everywhere it is used (e.g. Heading 1 in 黑体 三号 without automatic numbers; Normal in 宋体 小四, 1.5 lines, 2-character first-line indent). Set the styles first, then write; this replaces fiddling with Word's style dialogs.
-- page_setup {paper?: A4|A3|B5|Letter, orientation?, top?, bottom?, left?, right?} (margins in cm); page_numbers {align?, start?}; header {text}; page_break {para, expect} (that paragraph starts a new page); insert_toc {title?, levels?, para?, where?}; update_fields {}
-
-Excel ops. sheet = sheet name (default: the active sheet).
+- page_setup {paper?: A4|A3|B5|Letter, orientation?, top?, bottom?, left?, right?} (margins in cm); page_numbers {align?, start?}; header {text}; page_break {para, expect} (that paragraph starts a new page); insert_toc {title?, levels?, para?, where?}; update_fields {}`,
+  excel: `Excel ops. sheet = sheet name (default: the active sheet).
 - write_range {range: top-left cell, values:[[..],..]} — a string starting with "=" is a formula; also takes the format_range fields.
 - format_range {range, bold?, italic?, size?, font?, color?, fill?, numberFormat?, align?, wrap?, border?, merge?, columnWidth?, rowHeight?}
 - autofit {range?}; insert_rows / delete_rows {row, count?}
 - add_sheet {name}; rename_sheet {sheet, name}; delete_sheet {sheet}
-- add_chart {range, chart?: column|bar|line|pie|scatter|area, title?, at?: cell, width?, height?}
-
-PowerPoint ops. slide = slide number; shape = a shape name from office_read, or "title" / "body". Positions and sizes are in points. Formulas: write LaTeX between dollar signs in any slide text (title, body, text box), as in Word; they become native PowerPoint equations, inline with the text. A formula on its own gets a text box of its own.
+- add_chart {range, chart?: column|bar|line|pie|scatter|area, title?, at?: cell, width?, height?}`,
+  ppt: `PowerPoint ops. slide = slide number; shape = a shape name from office_read, or "title" / "body". Positions and sizes are in points. Formulas: write LaTeX between dollar signs in any slide text (title, body, text box), as in Word; they become native PowerPoint equations, inline with the text. A formula on its own gets a text box of its own.
 - add_slide {layout?: title|title_content|two_content|title_only|blank|section, title?, body?, notes?, at?} — body: lines separated by newlines become bullets.
-- set_text {slide, shape, text, size?, bold?, color?, align?}
+- set_text {slide, shape, text, size?, bold?, color?, align?} — a line that starts with a tab (or two spaces) is a bullet one level down.
+- format_text {slide, shape, find?, font?, size?, bold?, italic?, underline?, color?, align?, bullets?, lineSpacing?, fit?: "shrink"|"grow"|"none"} — the whole text of the shape, or only the part that reads find.
 - add_textbox {slide, text, left, top, width, height, size?, bold?, color?, align?, fill?, name?}
 - add_image {slide, path, left, top, width?, height?, name?}
+- add_smartart {slide, layout, items, left?, top?, width?, height?, colors?, look?, name?} — a native SmartArt diagram. layout: list | bullet_list | horizontal_list | process | chevron | arrows | timeline | steps | cycle | radial | hierarchy | org_chart | tree | pyramid | venn | matrix | funnel | target | balance | gear, or the name a layout has in PowerPoint. items: texts, or {text, children:[..]} for the levels below (the branches of a hierarchy, the bullets under a step). Prefer it to hand-drawn boxes and arrows for steps, cycles, structures and comparisons.
+- add_table {slide, data:[[cell,..],..], left?, top?, width?, height?, size?, font?, align?, header?, name?} — a native table; formulas in its cells are set as text with real subscripts and powers.
+- add_shape {slide, kind, left, top, width, height, text?, fill?, line?: colour|"none", lineWidth?, size?, bold?, color?, name?} — kind: rectangle | rounded | ellipse | diamond | triangle | arrow | arrow_left | arrow_up | arrow_down | chevron | pentagon | hexagon | star | callout | cloud | line | arrow_line (for a line, width and height are how far it runs).
 - set_shape {slide, shape, left?, top?, width?, height?, fill?, name?}; delete_shape {slide, shape}
-- delete_slide {slide}; move_slide {slide, to}; set_notes {slide, text}
-
-Colours are "#RRGGBB"; align is left | center | right | justify; file paths are absolute.`
+- delete_slide {slide}; move_slide {slide, to}; duplicate_slide {slide, to?}; set_layout {slide, layout}; set_background {slide, color}; set_notes {slide, text}`,
+}
 
 export function createTools(host: ToolHost): ToolDefinition[] {
   const { helper } = host
@@ -138,6 +145,18 @@ export function createTools(host: ToolHost): ToolDefinition[] {
   // Documents edited since the model last looked at a picture of them.
   const unseen = new Set<string>()
   const keyOf = (on: { app: AppKind; doc?: string }): string => `${on.app}:${fileName(on.doc).toLowerCase()}`
+  // Which apps' operation lists each conversation has been given already.
+  const told = new Map<string, Set<AppKind>>()
+  const sessionOf = (exec: unknown): string => (exec as { agent?: { session?: { id?: string } } } | undefined)?.agent?.session?.id ?? 'default'
+  /** The operation list of an app, the first time a conversation works with it ('' afterwards). */
+  const guide = (exec: unknown, kind: AppKind): string => {
+    const session = sessionOf(exec)
+    let seen = told.get(session)
+    if (!seen) { seen = new Set(); told.set(session, seen) }
+    if (seen.has(kind)) return ''
+    seen.add(kind)
+    return `\n\n${APP_NAMES[kind]} operations for office_edit (this list is given once; office_help {app: "${kind}"} gives it again):\n${GUIDES[kind]}`
+  }
 
   /** Pictures of the document as it is now: Word pages or PowerPoint slides first..last, or an Excel range. */
   const picture = async (on: { app: AppKind; doc?: string }, first: number, last: number, extra: Record<string, unknown>, width: number): Promise<{ lines: string[]; images: AttachmentJson[]; total?: number }> => {
@@ -209,7 +228,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     },
     output,
     timeoutMs: 90_000,
-    async execute(args): Promise<Value> {
+    async execute(args, exec): Promise<Value> {
       const { path, app } = args as { path?: string; app?: string }
       if (path !== undefined && !isAbsolute(path)) throw new Error('path must be an absolute path.')
       const kind = appOf({ ...(app === undefined ? {} : { app }), ...(path === undefined ? {} : { path }) })
@@ -217,7 +236,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const doc = await helper.call<DocInfo>('open', { app: kind, ...(path === undefined ? {} : { path }), show: showOnOpen, follow, typing, card }, 80_000)
       current = { app: kind, doc: doc.path ?? doc.name }
       if (doc.how !== 'attached') own.add(keyOf(current))
-      return { text: formatOpened(doc) }
+      return { text: formatOpened(doc) + guide(exec, kind) }
     },
     presentCall: args => card(`打开 ${fileName((args as { path?: string }).path) || '新文档'}`),
   }))
@@ -251,19 +270,19 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     output,
     timeoutMs: 60_000,
     isConcurrencySafe: () => true,
-    async execute(args): Promise<Value> {
+    async execute(args, exec): Promise<Value> {
       const input = args as Target & Record<string, unknown>
       const { doc: _doc, app: _app, ...rest } = input
       const on = target(input), kind = on.app
       const result = await helper.call<unknown>('read', { ...on, ...rest }, 50_000)
-      return { text: kind === 'word' ? formatWord(result as WordRead) : kind === 'excel' ? formatExcel(result as ExcelRead) : formatPpt(result as PptRead) }
+      return { text: (kind === 'word' ? formatWord(result as WordRead) : kind === 'excel' ? formatExcel(result as ExcelRead) : formatPpt(result as PptRead)) + guide(exec, kind) }
     },
     presentCall: args => card(`读取 ${fileName((args as Target).doc) || '当前文档'}`),
   }))
 
   tools.push(defineTool({
     name: 'office_edit',
-    description: EDIT_GUIDE,
+    description: EDIT_CORE,
     parameters: {
       doc: DOC,
       app: APP,
@@ -274,7 +293,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     },
     output,
     timeoutMs: 5 * 60_000,
-    async execute(args): Promise<Value> {
+    async execute(args, exec): Promise<Value> {
       const input = args as unknown as Target & { ops: unknown }
       if (!Array.isArray(input.ops) || input.ops.length === 0) throw new Error('ops must be a non-empty array.')
       if (input.ops.length > 200) throw new Error('At most 200 operations per call.')
@@ -282,12 +301,31 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const on = target(input)
       const result = await helper.call<EditResult>('edit', { ...on, ops: input.ops, follow, typing, card }, 4.5 * 60_000)
       if (result.done.length > 0) unseen.add(keyOf(on))
-      return { text: formatEdit(result) }
+      // A conversation that edits without having opened or read (the document was open already) gets the list here.
+      return { text: formatEdit(result) + guide(exec, on.app) }
     },
     presentCall: args => {
       const { doc, ops } = args as Target & { ops?: unknown[] }
       return card(`编辑 ${fileName(doc) || '当前文档'}${Array.isArray(ops) ? ` · ${ops.length} 项` : ''}`)
     },
+  }))
+
+  tools.push(defineTool({
+    name: 'office_help',
+    description: 'The operations office_edit takes for one app, with their fields: Word (text, formulas, tables, pictures, citations, styles, page setup), Excel (cells, formats, sheets, charts) or PowerPoint (slides, text, pictures, SmartArt, tables, shapes). Call it whenever you are not sure what an operation is called or what fields it takes.',
+    parameters: {
+      app: { type: 'string', enum: ['word', 'excel', 'ppt'], required: true, description: 'Which app.' },
+    },
+    output,
+    isConcurrencySafe: () => true,
+    async execute(args, exec): Promise<Value> {
+      const kind = appOf({ app: (args as { app?: string }).app ?? '' })
+      const session = sessionOf(exec)
+      if (!told.has(session)) told.set(session, new Set())
+      told.get(session)!.add(kind)
+      return { text: `${APP_NAMES[kind]} operations for office_edit:\n${GUIDES[kind]}\n\n${TAIL}` }
+    },
+    presentCall: args => card(`查看 ${APP_NAMES[appOf({ app: (args as { app?: string }).app ?? 'word' })]} 操作说明`),
   }))
 
   tools.push(defineTool({

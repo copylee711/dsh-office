@@ -28,6 +28,8 @@
 | 三线表与表格格式 | `insert_table` 的 `borders` 可选 `grid`（全框线）、`three-line`（论文三线表：上下粗线、表头下细线）、`none`；`format_table` 修改已有表格的框线、字号、行高、是否保持在同一页 |
 | 图片尺寸 | `set_image` 调整已有图片的宽高（磅或 `"12cm"`）；插图所在段落不受固定行距裁切 |
 | 图表与正文连续写 | `insert_paragraphs` 的条目里可以直接放图片或表格，按顺序落在前后段落之间，不必再数段落号 |
+| 幻灯片图示与表格 | PowerPoint 里可以直接生成原生 SmartArt（流程、循环、层次结构、组织结构图、棱锥、维恩图等 20 种常用版式，条目可带下级）、原生表格、常用形状和连线，正文可写多级要点 |
+| 操作说明按需提供 | 每次请求只带一段简短说明；某个应用的全部操作清单在 AI 第一次打开或读取该应用的文档时随结果给出一次，之后可用 `office_help` 再取。用不到的应用不占上下文 |
 | 表格跨页 | 表头行在下一页重复，单行不被拆到两页，表题不会单独留在页尾 |
 | 批量编辑 | `office_edit` 一次调用按顺序执行一批修改（写一整篇文档、填一张表加公式加图表、做几页幻灯片），中途某一项失败就停下并报告已完成哪些 |
 | 改错位置的防护 | Word 按“段落编号 + 这段开头的文字”定位。你刚改过导致编号对不上时，这一步会被拒绝并要求重新读取；改写和删除段落必须带开头文字 |
@@ -72,12 +74,13 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 | `office_render` | 把一页 / 一张幻灯片 / 一个单元格区域渲染成图片；Word 和 PowerPoint 一次最多看 4 页，或用总览把全部页面拼成一张图 |
 | `office_save` | 保存；给出路径时另存为，扩展名为 `.pdf` 时导出 PDF；改完没看过成品时附带各页图片 |
 | `office_close` | 关闭 AI 自己打开或新建的文档；你原本开着的文档会被拒绝，有未保存修改时必须明确说保存还是丢弃 |
+| `office_help` | 列出某个应用（Word / Excel / PowerPoint）下 `office_edit` 的全部操作和字段 |
 
 `office_edit` 支持的操作：
 
 - Word：`insert_paragraphs`、`set_text`、`replace_text`、`format_text`、`delete_range`、`insert_table`、`set_cell`、`insert_image`、`set_image`、`format_table`、`insert_references`、`style_format`、`page_setup`、`page_numbers`、`header`、`page_break`、`insert_toc`、`update_fields`
 - Excel：`write_range`（值或公式）、`format_range`、`autofit`、`insert_rows`、`delete_rows`、`add_sheet`、`rename_sheet`、`delete_sheet`、`add_chart`
-- PowerPoint：`add_slide`、`set_text`、`add_textbox`、`add_image`、`set_shape`、`delete_shape`、`delete_slide`、`move_slide`、`set_notes`
+- PowerPoint：`add_slide`、`set_text`、`format_text`、`add_textbox`、`add_image`、`add_smartart`、`add_table`、`add_shape`、`set_shape`、`delete_shape`、`delete_slide`、`move_slide`、`duplicate_slide`、`set_layout`、`set_background`、`set_notes`
 
 ## 设置
 
@@ -100,8 +103,9 @@ AI 只有在调用保存时才写入文件，不会替你关闭文档。
 - Excel 和 PowerPoint 里 AI 的修改无法用 Ctrl+Z 撤回（Excel 的外部修改不进撤销栈，并且会清空已有的撤销记录）。只有 Word 支持整批撤销。
 - 你正在单元格里输入、或 Office 开着模态对话框时，修改会被 Office 拒绝；插件等待约 5 秒后报告“应用忙”。
 - Excel 区域的图片是通过剪贴板取得的，渲染时剪贴板里的文字会被保留，图片、文件等其他内容会丢失。
-- 公式由插件自己启动的一份不可见的 Word 解析，第一次用到公式时多等一两秒；这份 Word 随插件进程退出。Excel 里还不能写原生公式。
-- PowerPoint 的公式经剪贴板放入幻灯片，这一批修改结束后会把剪贴板恢复为原来的文字、图片或文件；其他格式的剪贴板内容可能丢失。
+- 公式由插件自己启动的一份不可见的 Word 解析，不动你正在用的 Word。它只在一批修改期间存在（启动约 1 秒），这一批结束就关闭；万一插件中途被强行结束而留下了它，下次插件启动时会清掉。Excel 里还不能写原生公式。
+- PowerPoint 的公式经剪贴板放入幻灯片。做法与电脑控制插件一致：先把剪贴板上的全部内容存起来，每写完一段文字立刻放回，且不进剪贴板历史；这期间你自己复制了新内容的话，以你的为准，不会被覆盖。Word 复制公式的那一下仍会出现在 Win+V 历史里。
+- PowerPoint 的表格单元格和 SmartArt 节点里放不了排好版的公式，公式在那里写成带上下标的文字。
 - 引用按编号书写，插入或删除文献后不会自动重新编号。
 - 兼容模式（Word 97–2003 格式）的文档里不能建立原生公式。
 - 目前不支持 WPS。

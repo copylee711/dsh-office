@@ -347,6 +347,7 @@ static class Program
         try { SetProcessDPIAware(); } catch (Exception) { }
         Send(new Dictionary<string, object> { { "event", "ready" } });
         AppDomain.CurrentDomain.ProcessExit += delegate { MathQuit(); };
+        Sweep();
         string line;
         while ((line = input.ReadLine()) != null)
         {
@@ -434,6 +435,9 @@ static class Program
         catch (COMException) { return null; }
     }
 
+    /// The apps this helper started because they were not running (as opposed to the ones it found open).
+    static readonly HashSet<string> Started = new HashSet<string>();
+
     static dynamic App(string kind, bool start)
     {
         dynamic app = Running(kind);
@@ -442,6 +446,7 @@ static class Program
         Type type = Type.GetTypeFromProgID(ProgId(kind));
         if (type == null) throw new Fail("NOT_INSTALLED", AppName(kind) + " is not installed on this computer.");
         app = Activator.CreateInstance(type);
+        Started.Add(kind);
         // Started by automation, Excel would quit once we let go of it; hand it to the user.
         if (kind == "excel") { try { app.UserControl = true; } catch (Exception) { } }
         return app;
@@ -711,6 +716,21 @@ static class Program
         if (kind == "word") doc.Close(save ? -1 : 0);
         else if (kind == "excel") doc.Close(save);
         else { if (save) doc.Save(); else doc.Saved = -1; doc.Close(); }
+        // An app this helper started itself, now holding nothing, would be left as an empty window: it goes too.
+        if (Started.Contains(kind))
+        {
+            try
+            {
+                dynamic app = Running(kind);
+                if (app != null && (int)(kind == "word" ? app.Documents.Count : kind == "excel" ? app.Workbooks.Count : app.Presentations.Count) == 0)
+                {
+                    app.Quit();
+                    Started.Remove(kind);
+                    return "closed (and " + AppName(kind) + ", which was started for it, was closed too)";
+                }
+            }
+            catch (Exception) { }
+        }
         return "closed";
     }
 
@@ -2704,13 +2724,42 @@ static class Program
 
     static void PptWrite(dynamic textRange, string text)
     {
+        // A line that starts with tabs (or two spaces per step) is a bullet that many levels down.
+        string[] lines = text.Split('\r');
+        int[] levels = new int[lines.Length];
+        bool nested = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+            int at = 0, level = 0;
+            while (at < line.Length)
+            {
+                if (line[at] == '\t') { level++; at++; }
+                else if (at + 1 < line.Length && line[at] == ' ' && line[at + 1] == ' ') { level++; at += 2; }
+                else break;
+            }
+            if (level > 0 && at < line.Length) { lines[i] = line.Substring(at); levels[i] = Math.Min(level, 4); nested = true; }
+        }
+        if (nested) text = string.Join("\r", lines);
+        PptWriteText(textRange, text);
+        if (nested)
+        {
+            for (int i = 0; i < lines.Length; i++)
+            {
+                try { textRange.Paragraphs(i + 1).IndentLevel = levels[i] + 1; } catch (Exception) { }
+            }
+        }
+        if (text.IndexOf('$') >= 0) PptMath(textRange);
+    }
+
+    static void PptWriteText(dynamic textRange, string text)
+    {
         if (!Typing || text.Length < 4) textRange.Text = text;
         else
         {
             textRange.Text = "";
             foreach (string piece in Pieces(text)) { textRange.InsertAfter(piece); Thread.Sleep(14); }
         }
-        if (text.IndexOf('$') >= 0) PptMath(textRange);
     }
 
     // PowerPoint shows native equations but has no call to make one. Word has: the formula is built in a hidden
@@ -2718,26 +2767,69 @@ static class Program
     // The user's clipboard is put back when the batch is over.
 
     static dynamic MathWord, MathDoc;
-    static bool MathReads, MathWasLatex, ClipTaken;
-    static IDataObject ClipSaved;
+    static bool MathReads, MathWasLatex;
     static int PptMathFailed;
 
-    /// A Word of our own, never shown, kept for as long as the helper runs: the formulas are built there, so the
-    /// Word the user works in is left alone.
+    // That Word is nobody's to see, so it lives for one batch only: started at the first formula (about a second),
+    // gone when the batch ends. Its process id is written down while it lives; if the helper is ever cut off in the
+    // middle, the next helper finds the note and ends what was left behind.
+
+    static int MathPid;
+
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+
+    static string MathNotePath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-office", "math-word.pid");
+    }
+
+    /// A hidden Word left by a helper that did not get to close it: ended, if it still is that process and shows no window.
+    static void Sweep()
+    {
+        try
+        {
+            string note = MathNotePath();
+            if (!File.Exists(note)) return;
+            int pid;
+            if (int.TryParse(File.ReadAllText(note).Trim(), out pid) && pid > 0)
+            {
+                try
+                {
+                    using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(pid))
+                    {
+                        if (process.ProcessName.Equals("WINWORD", StringComparison.OrdinalIgnoreCase) && process.MainWindowHandle == IntPtr.Zero) process.Kill();
+                    }
+                }
+                catch (Exception) { }
+            }
+            File.Delete(note);
+        }
+        catch (Exception) { }
+    }
+
+    /// A Word of our own, never shown: the formulas are built there, so the Word the user works in is left alone.
     static bool MathSource()
     {
         if (MathDoc != null) return MathReads;
         try
         {
-            if (MathWord == null)
-            {
-                MathWord = Activator.CreateInstance(Type.GetTypeFromProgID("Word.Application"));
-                MathWord.Visible = false;
-                try { MathWord.DisplayAlerts = 0; } catch (Exception) { }
-            }
+            MathWord = Activator.CreateInstance(Type.GetTypeFromProgID("Word.Application"));
+            MathWord.Visible = false;
+            try { MathWord.DisplayAlerts = 0; } catch (Exception) { }
             MathDoc = MathWord.Documents.Add();
-            // Nothing in this scratch document is to be "corrected" on the way.
-            try { MathWord.Options.AutoFormatAsYouTypeReplaceQuotes = false; } catch (Exception) { }
+            try
+            {
+                uint pid;
+                GetWindowThreadProcessId(new IntPtr((int)MathDoc.ActiveWindow.Hwnd), out pid);
+                MathPid = (int)pid;
+                if (MathPid != 0)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(MathNotePath()));
+                    File.WriteAllText(MathNotePath(), MathPid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+            }
+            catch (Exception) { }
             dynamic bars = MathWord.CommandBars;
             MathWasLatex = (bool)bars.GetPressedMso("EquationLaTexFormat");
             if (!MathWasLatex) bars.ExecuteMso("EquationLaTexFormat");
@@ -2747,59 +2839,161 @@ static class Program
         return MathReads && MathDoc != null;
     }
 
-    static void SaveClipboard()
-    {
-        if (ClipTaken) return;
-        ClipTaken = true;
-        ClipSaved = null;
-        try
-        {
-            IDataObject now = Clipboard.GetDataObject();
-            if (now == null) return;
-            DataObject copy = new DataObject();
-            bool any = false;
-            foreach (string format in new string[] { DataFormats.UnicodeText, DataFormats.Text, DataFormats.Html, DataFormats.Rtf, DataFormats.Bitmap, DataFormats.FileDrop })
-            {
-                if (!now.GetDataPresent(format)) continue;
-                object value = now.GetData(format);
-                if (value == null) continue;
-                copy.SetData(format, value);
-                any = true;
-            }
-            if (any) ClipSaved = copy;
-        }
-        catch (Exception) { ClipSaved = null; }
-    }
+    // The clipboard is the only way into a slide for an equation. The user's is treated as the computer-use plugin
+    // treats it: everything on it is set aside first, and put back right after, unless the user copied something
+    // in between (then theirs is the newer one and stays).
 
-    /// End of a batch: the scratch document goes, the equation input of that Word is put back, and so is the clipboard.
-    static void MathDone()
+    static DataObject ClipSaved;
+    static bool ClipTaken;
+    static uint ClipOurs;
+
+    static DataObject Snapshot()
     {
-        if (MathDoc != null)
+        for (int i = 0; i < 5; i++)
         {
             try
             {
-                dynamic bars = MathWord.CommandBars;
-                if (!MathWasLatex && !(bool)bars.GetPressedMso("EquationUnicodeFormat")) bars.ExecuteMso("EquationUnicodeFormat");
+                IDataObject now = Clipboard.GetDataObject();
+                if (now == null) return null;
+                string[] formats = now.GetFormats(false);
+                if (formats.Length == 0) return null;
+                DataObject copy = new DataObject();
+                foreach (string format in formats)
+                {
+                    if (format == "CanIncludeInClipboardHistory" || format == "CanUploadToCloudClipboard" || format == "ExcludeClipboardContentFromMonitorProcessing") continue;
+                    try { object value = now.GetData(format, false); if (value != null) copy.SetData(format, false, value); } catch (Exception) { }
+                }
+                return copy;
             }
-            catch (Exception) { }
-            try { MathDoc.Close(SaveChanges: 0); } catch (Exception) { }
+            catch (ExternalException) { Thread.Sleep(50); }
         }
-        MathDoc = null;
-        if (ClipTaken)
+        return null;
+    }
+
+    static void SaveClipboard()
+    {
+        if (ClipTaken) return;
+        ClipSaved = Snapshot();
+        ClipTaken = true;
+    }
+
+    /// Back to what the user had, kept out of the clipboard history; not if they copied something meanwhile.
+    static void RestoreClipboard()
+    {
+        if (!ClipTaken) return;
+        ClipTaken = false;
+        DataObject data = ClipSaved;
+        ClipSaved = null;
+        if (GetClipboardSequenceNumber() != ClipOurs) return;
+        for (int i = 0; i < 5; i++)
         {
-            ClipTaken = false;
-            try { if (ClipSaved != null) Clipboard.SetDataObject(ClipSaved, true); else Clipboard.Clear(); }
-            catch (Exception) { }
-            ClipSaved = null;
+            try
+            {
+                if (data == null) Clipboard.Clear();
+                else
+                {
+                    data.SetData("ExcludeClipboardContentFromMonitorProcessing", false, new MemoryStream(new byte[] { 1, 0, 0, 0 }));
+                    data.SetData("CanIncludeInClipboardHistory", false, new MemoryStream(BitConverter.GetBytes(0)));
+                    data.SetData("CanUploadToCloudClipboard", false, new MemoryStream(BitConverter.GetBytes(0)));
+                    Clipboard.SetDataObject(data, true);
+                }
+                return;
+            }
+            catch (ExternalException) { Thread.Sleep(50); }
         }
     }
 
-    /// The helper is going: so does its Word.
-    static void MathQuit()
+    /// End of a batch: the clipboard is the user's again, and the helper's Word is closed.
+    static void MathDone()
     {
-        try { MathDone(); } catch (Exception) { }
-        if (MathWord != null) { try { MathWord.Quit(SaveChanges: 0); } catch (Exception) { } }
+        RestoreClipboard();
+        if (MathWord == null) return;
+        try
+        {
+            dynamic bars = MathWord.CommandBars;
+            if (!MathWasLatex && !(bool)bars.GetPressedMso("EquationUnicodeFormat")) bars.ExecuteMso("EquationUnicodeFormat");
+        }
+        catch (Exception) { }
+        try { if (MathDoc != null) MathDoc.Close(SaveChanges: 0); } catch (Exception) { }
+        try
+        {
+            // Should a document of the user's have landed in this Word meanwhile, it is theirs: shown, not closed.
+            if ((int)MathWord.Documents.Count == 0) MathWord.Quit(SaveChanges: 0);
+            else MathWord.Visible = true;
+        }
+        catch (Exception) { }
+        MathDoc = null;
         MathWord = null;
+        MathPid = 0;
+        try { File.Delete(MathNotePath()); } catch (Exception) { }
+    }
+
+    static void MathQuit() { try { MathDone(); } catch (Exception) { } }
+
+    /// Where PowerPoint keeps an equation in its typed-out form (a table cell does), a formula is written as text
+    /// instead: Word's linear form of it, with the subscripts and powers set as such.
+    static void PptFlatMath(dynamic textRange)
+    {
+        string text = (string)textRange.Text;
+        if (text == null || text.IndexOf('$') < 0) return;
+        List<string> sources = new List<string>();
+        foreach (System.Text.RegularExpressions.Match m in Dollars.Matches(text)) sources.Add((m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim());
+        Dictionary<string, string> linear = ToLinear(sources);
+        StringBuilder o = new StringBuilder();
+        List<int[]> spans = new List<int[]>();   // start, length, 1 = subscript / 2 = superscript
+        int at = 0;
+        foreach (System.Text.RegularExpressions.Match m in Dollars.Matches(text))
+        {
+            o.Append(text, at, m.Index - at);
+            at = m.Index + m.Length;
+            string source = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim(), read;
+            if (!linear.TryGetValue(source, out read)) { o.Append(source); PptMathFailed++; continue; }
+            int i = 0;
+            while (i < read.Length)
+            {
+                char c = read[i];
+                if ((c == '_' || c == '^') && i + 1 < read.Length)
+                {
+                    int from = i + 1, to;
+                    if (read[from] == '(')
+                    {
+                        int depth = 0;
+                        for (to = from; to < read.Length; to++) { if (read[to] == '(') depth++; else if (read[to] == ')' && --depth == 0) break; }
+                        if (to >= read.Length) { o.Append(c); i++; continue; }
+                        string inner = read.Substring(from + 1, to - from - 1);
+                        spans.Add(new int[] { o.Length, inner.Length, c == '_' ? 1 : 2 });
+                        o.Append(inner);
+                        i = to + 1;
+                    }
+                    else
+                    {
+                        to = from;
+                        while (to < read.Length && (char.IsLetterOrDigit(read[to]) || char.IsSurrogate(read[to]) || read[to] == '−' || read[to] == '-' || read[to] == '+' || read[to] == '∞') && !(to > from && (read[to] == '-' || read[to] == '+' || read[to] == '−'))) to++;
+                        if (to == from) { o.Append(c); i++; continue; }
+                        spans.Add(new int[] { o.Length, to - from, c == '_' ? 1 : 2 });
+                        o.Append(read, from, to - from);
+                        i = to;
+                    }
+                    // The space that ended the script in the linear form has done its work.
+                    if (i < read.Length && read[i] == ' ') i++;
+                    continue;
+                }
+                if (c == '▒' || c == '〖' || c == '〗' || c == '\u2061') { i++; continue; }
+                o.Append(c);
+                i++;
+            }
+        }
+        o.Append(text, at, text.Length - at);
+        textRange.Text = o.ToString();
+        foreach (int[] span in spans)
+        {
+            try
+            {
+                dynamic part = textRange.Characters(span[0] + 1, span[1]);
+                if (span[2] == 1) part.Font.Subscript = -1; else part.Font.Superscript = -1;
+            }
+            catch (Exception) { }
+        }
     }
 
     /// $...$ in the text of a shape become native equations, in place.
@@ -2832,13 +3026,14 @@ static class Program
                 bool pasted = false;
                 for (int attempt = 0; attempt < 3 && !pasted; attempt++)
                 {
-                    try { equation.Copy(); spot.Paste(); pasted = true; }
+                    try { equation.Copy(); spot.Paste(); pasted = true; ClipOurs = GetClipboardSequenceNumber(); }
                     catch (COMException) { Thread.Sleep(80); }
                 }
                 if (pasted) made++; else PptMathFailed++;
             }
             catch (Exception) { PptMathFailed++; }
         }
+        RestoreClipboard();
         return made;
     }
 
@@ -2873,6 +3068,60 @@ static class Program
         if (op.Has("height")) shape.Height = (float)op.Num("height", 100);
         if (op.Has("fill")) { shape.Fill.Visible = -1; shape.Fill.Solid(); shape.Fill.ForeColor.RGB = Bgr(op.Need("fill")); }
         if (op.Has("name")) shape.Name = op.Need("name");
+    }
+
+    static readonly Dictionary<string, int> Forms = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "rectangle", 1 }, { "rounded", 5 }, { "ellipse", 9 }, { "diamond", 4 }, { "triangle", 7 }, { "arrow", 33 }, { "arrow_left", 34 }, { "arrow_up", 35 }, { "arrow_down", 36 },
+        { "chevron", 52 }, { "pentagon", 51 }, { "star", 92 }, { "callout", 108 }, { "hexagon", 10 }, { "cloud", 179 },
+    };
+
+    /// SmartArt layouts by a plain name; the value is the end of the layout's id.
+    static readonly Dictionary<string, string> Diagrams = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "list", "default" }, { "bullet_list", "vList2" }, { "horizontal_list", "hList1" }, { "process", "process1" }, { "chevron", "chevron1" }, { "arrows", "hProcess9" },
+        { "timeline", "hProcess11" }, { "steps", "process2" }, { "cycle", "cycle2" }, { "radial", "radial1" }, { "hierarchy", "hierarchy1" }, { "org_chart", "orgChart1" },
+        { "tree", "hierarchy2" }, { "pyramid", "pyramid1" }, { "venn", "venn1" }, { "matrix", "matrix1" }, { "funnel", "funnel1" }, { "target", "target1" }, { "balance", "balance1" }, { "gear", "gear1" },
+    };
+
+    /// One item of a diagram on its node: a text, or {text, children:[..]} whose children hang below it.
+    static int Branch(dynamic node, object raw)
+    {
+        IList children = null;
+        string text;
+        Dictionary<string, object> map = raw as Dictionary<string, object>;
+        if (map != null)
+        {
+            object value;
+            text = map.TryGetValue("text", out value) && value != null ? Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) : "";
+            if (map.TryGetValue("children", out value)) children = value as IList;
+        }
+        else text = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture);
+        if (text.IndexOf('$') >= 0)
+        {
+            // A diagram node holds plain text only: a formula is written in Word's linear form (Φ, x^2).
+            List<string> sources = new List<string>();
+            foreach (System.Text.RegularExpressions.Match m in Dollars.Matches(text)) sources.Add((m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim());
+            Dictionary<string, string> linear = ToLinear(sources);
+            text = Dollars.Replace(text, delegate(System.Text.RegularExpressions.Match m)
+            {
+                string source = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim(), read;
+                return linear.TryGetValue(source, out read) ? read : source;
+            });
+        }
+        node.TextFrame2.TextRange.Text = text;
+        int made = 1;
+        if (children != null)
+        {
+            dynamic previous = null;
+            foreach (object child in children)
+            {
+                dynamic below = previous == null ? node.AddNode(5) : previous.AddNode(2);
+                made += Branch(below, child);
+                previous = below;
+            }
+        }
+        return made;
     }
 
     static readonly Dictionary<string, int> Layouts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
@@ -2921,7 +3170,140 @@ static class Program
             if (op.Has("name")) picture.Name = op.Need("name");
             return "picture \"" + (string)picture.Name + "\" added";
         }
+        if (type == "duplicate_slide")
+        {
+            dynamic copy = target.Duplicate();
+            int at = (int)copy.SlideIndex;
+            if (op.Has("to")) { copy.MoveTo(op.Int("to", at)); at = op.Int("to", at); }
+            GoTo(deck, at);
+            return "slide duplicated as slide " + at;
+        }
+        if (type == "set_layout")
+        {
+            int layout;
+            string name = op.Need("layout");
+            if (!Layouts.TryGetValue(name, out layout)) throw new Fail("BAD_ARGS", "Unknown layout \"" + name + "\": use " + string.Join(", ", new List<string>(Layouts.Keys).ToArray()) + ".");
+            target.Layout = layout;
+            return "layout set";
+        }
+        if (type == "set_background")
+        {
+            target.FollowMasterBackground = 0;
+            target.Background.Fill.Visible = -1;
+            target.Background.Fill.Solid();
+            target.Background.Fill.ForeColor.RGB = Bgr(op.Need("color"));
+            return "background set";
+        }
+        if (type == "add_shape")
+        {
+            string kind = op.Str("kind", "rectangle").ToLowerInvariant();
+            float left = (float)op.Num("left", 60), top = (float)op.Num("top", 60), width = (float)op.Num("width", 200), height = (float)op.Num("height", 80);
+            dynamic made;
+            if (kind == "line" || kind == "arrow_line")
+            {
+                made = target.Shapes.AddLine(left, top, left + width, top + height);
+                if (kind == "arrow_line") made.Line.EndArrowheadStyle = 2;
+            }
+            else
+            {
+                int form;
+                if (!Forms.TryGetValue(kind, out form)) throw new Fail("BAD_ARGS", "Unknown shape kind \"" + kind + "\": use " + string.Join(", ", new List<string>(Forms.Keys).ToArray()) + ", line, arrow_line.");
+                made = target.Shapes.AddShape(form, left, top, width, height);
+                if (op.Has("fill")) { made.Fill.Visible = -1; made.Fill.Solid(); made.Fill.ForeColor.RGB = Bgr(op.Need("fill")); }
+                if (op.Has("text")) PptText(made, op);
+            }
+            if (op.Has("line"))
+            {
+                string line = op.Need("line");
+                if (line == "none") made.Line.Visible = 0; else { made.Line.Visible = -1; made.Line.ForeColor.RGB = Bgr(line); }
+            }
+            if (op.Has("lineWidth")) made.Line.Weight = (float)op.Num("lineWidth", 1);
+            if (op.Has("name")) made.Name = op.Need("name");
+            return "shape \"" + (string)made.Name + "\" added";
+        }
+        if (type == "add_table")
+        {
+            IList data = op.List("data");
+            if (data == null || data.Count == 0) throw new Fail("BAD_ARGS", "\"data\" must list the rows of the table.");
+            int rows = data.Count, cols = 1;
+            foreach (object row in data) { IList cells = row as IList; if (cells != null) cols = Math.Max(cols, cells.Count); }
+            dynamic made = target.Shapes.AddTable(rows, cols, (float)op.Num("left", 60), (float)op.Num("top", 120), (float)op.Num("width", 600), (float)op.Num("height", 28 * rows));
+            dynamic grid = made.Table;
+            for (int r = 0; r < rows; r++)
+            {
+                IList cells = data[r] as IList;
+                if (cells == null) continue;
+                for (int c = 0; c < cells.Count; c++)
+                {
+                    if (cells[c] == null) continue;
+                    dynamic range = grid.Cell(r + 1, c + 1).Shape.TextFrame.TextRange;
+                    string value = Convert.ToString(cells[c], System.Globalization.CultureInfo.InvariantCulture);
+                    range.Text = value;
+                    if (op.Has("size")) range.Font.Size = (float)op.Num("size", 16);
+                    if (op.Has("font")) { string font = op.Need("font"); range.Font.Name = font; try { range.Font.NameFarEast = font; } catch (COMException) { } }
+                    if (op.Has("align")) { string align = op.Need("align"); range.ParagraphFormat.Alignment = align == "center" ? 2 : align == "right" ? 3 : 1; }
+                    if (value.IndexOf('$') >= 0) PptFlatMath(range);
+                }
+                if (Typing) Thread.Sleep(25);
+            }
+            if (op.Has("header") && !op.Flag("header", true)) grid.FirstRow = 0;
+            if (op.Has("name")) made.Name = op.Need("name");
+            return "table \"" + (string)made.Name + "\" added (" + rows + "×" + cols + ")";
+        }
+        if (type == "add_smartart")
+        {
+            IList items = op.List("items");
+            if (items == null || items.Count == 0) throw new Fail("BAD_ARGS", "\"items\" must list the texts of the diagram.");
+            string wanted = op.Str("layout", "process");
+            string id;
+            if (!Diagrams.TryGetValue(wanted, out id)) id = wanted;
+            dynamic layouts = deck.Application.SmartArtLayouts, layout = null;
+            int count = (int)layouts.Count;
+            for (int i = 1; i <= count && layout == null; i++)
+            {
+                dynamic candidate = layouts[i];
+                string full = (string)candidate.Id;
+                if (full.EndsWith("/" + id, StringComparison.OrdinalIgnoreCase) || string.Equals((string)candidate.Name, wanted, StringComparison.OrdinalIgnoreCase)) layout = candidate;
+            }
+            if (layout == null) throw new Fail("BAD_ARGS", "Unknown SmartArt layout \"" + wanted + "\": use " + string.Join(", ", new List<string>(Diagrams.Keys).ToArray()) + ", or the name the layout has in PowerPoint.");
+            dynamic made = target.Shapes.AddSmartArt(layout, (float)op.Num("left", 60), (float)op.Num("top", 130), (float)op.Num("width", 840), (float)op.Num("height", 330));
+            dynamic art = made.SmartArt;
+            // The layout comes with sample nodes: all but one go, and the items are built from that one.
+            for (int guard = 0; guard < 60 && (int)art.AllNodes.Count > 1; guard++) art.AllNodes[(int)art.AllNodes.Count].Delete();
+            dynamic first = art.AllNodes[1], previous = null;
+            int nodes = 0;
+            foreach (object raw in items)
+            {
+                dynamic node = previous == null ? first : previous.AddNode(2);
+                nodes += Branch(node, raw);
+                previous = node;
+            }
+            if (op.Has("colors")) { try { art.Color = deck.Application.SmartArtColors[op.Int("colors", 1)]; } catch (Exception) { } }
+            if (op.Has("look")) { try { art.QuickStyle = deck.Application.SmartArtQuickStyles[op.Int("look", 1)]; } catch (Exception) { } }
+            if (op.Has("name")) made.Name = op.Need("name");
+            return "SmartArt \"" + (string)made.Name + "\" added (" + (string)layout.Name + ", " + nodes + " items)";
+        }
         dynamic shape = Shape(target, op.Need("shape"));
+        if (type == "format_text")
+        {
+            dynamic all = shape.TextFrame.TextRange, part = all;
+            if (op.Has("find"))
+            {
+                part = all.Find(op.Need("find"));
+                if (part == null) throw new Fail("NOT_FOUND", "The text \"" + op.Need("find") + "\" does not occur in that shape.");
+            }
+            if (op.Has("font")) { string font = op.Need("font"); part.Font.Name = font; try { part.Font.NameFarEast = font; } catch (COMException) { } }
+            if (op.Has("size")) part.Font.Size = (float)op.Num("size", 18);
+            if (op.Has("bold")) part.Font.Bold = op.Flag("bold", false) ? -1 : 0;
+            if (op.Has("italic")) part.Font.Italic = op.Flag("italic", false) ? -1 : 0;
+            if (op.Has("underline")) part.Font.Underline = op.Flag("underline", false) ? -1 : 0;
+            if (op.Has("color")) part.Font.Color.RGB = Bgr(op.Need("color"));
+            if (op.Has("align")) { string align = op.Need("align"); part.ParagraphFormat.Alignment = align == "center" ? 2 : align == "right" ? 3 : 1; }
+            if (op.Has("bullets")) part.ParagraphFormat.Bullet.Visible = op.Flag("bullets", true) ? -1 : 0;
+            if (op.Has("lineSpacing")) part.ParagraphFormat.SpaceWithin = (float)op.Num("lineSpacing", 1);
+            if (op.Has("fit")) { try { shape.TextFrame2.AutoSize = op.Need("fit") == "shrink" ? 2 : op.Need("fit") == "grow" ? 1 : 0; } catch (Exception) { } }
+            return "text formatted";
+        }
         if (type == "set_text") { op.Need("text"); PptText(shape, op); return "text set"; }
         if (type == "set_shape") { PptBox(shape, op); PptText(shape, op); return "shape updated"; }
         if (type == "delete_shape") { shape.Delete(); return "shape deleted"; }
