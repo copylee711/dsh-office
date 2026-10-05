@@ -37,6 +37,24 @@ class Bag
         if (d == null) throw new Fail("BAD_ARGS", "Expected an object.");
     }
     public bool Has(string key) { return Raw(key) != null; }
+    /// The fields as given, all counted as looked at (they are handed on to another operation).
+    public Dictionary<string, object> Copy()
+    {
+        foreach (string key in d.Keys) read.Add(key);
+        return new Dictionary<string, object>(d);
+    }
+    /// A length in points: a plain number is points, "12cm", "120mm", "5in" and "12pt" / "12磅" say their unit.
+    public double Points(string key, double fallback)
+    {
+        object v = Raw(key);
+        if (v == null) return fallback;
+        string text = Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture).Trim().ToLowerInvariant();
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(text, @"^(-?\d+(\.\d+)?)\s*(pt|磅|cm|厘米|mm|毫米|in|英寸)?\z");
+        if (!m.Success) throw new Fail("BAD_ARGS", "\"" + key + "\" must be a length: a number of points, or \"12cm\".");
+        double value = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        string unit = m.Groups[3].Value;
+        return unit == "cm" || unit == "厘米" ? value * 28.3465 : unit == "mm" || unit == "毫米" ? value * 2.83465 : unit == "in" || unit == "英寸" ? value * 72 : value;
+    }
     public object Raw(string key) { object v; read.Add(key); return d.TryGetValue(key, out v) ? v : null; }
     public string Str(string key, string fallback)
     {
@@ -61,7 +79,13 @@ class Bag
         object v = Raw(key);
         if (v == null) return fallback;
         try { return Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture); }
-        catch { throw new Fail("BAD_ARGS", "\"" + key + "\" must be a number."); }
+        catch
+        {
+            // "6pt" where points are meant.
+            System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(Convert.ToString(v).Trim(), @"^(-?\d+(\.\d+)?)\s*(pt|磅)\z");
+            if (m.Success) return double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            throw new Fail("BAD_ARGS", "\"" + key + "\" must be a number.");
+        }
     }
     public bool Flag(string key, bool fallback)
     {
@@ -322,6 +346,7 @@ static class Program
         MessageFilter.Register();
         try { SetProcessDPIAware(); } catch (Exception) { }
         Send(new Dictionary<string, object> { { "event", "ready" } });
+        AppDomain.CurrentDomain.ProcessExit += delegate { MathQuit(); };
         string line;
         while ((line = input.ReadLine()) != null)
         {
@@ -1038,6 +1063,18 @@ static class Program
         if (text == null || text.IndexOf('$') < 0) return 0;
         int start = (int)range.Start, made = 0;
         System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
+        if (found.Count == 0) return 0;
+        // All the formulas of this piece of text are read by Word in one round.
+        List<string> sources = new List<string>();
+        foreach (System.Text.RegularExpressions.Match m in found)
+        {
+            string source = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+            System.Text.RegularExpressions.Match tagged = Tag.Match(source);
+            if (tagged.Success) source = source.Remove(tagged.Index, tagged.Length).Trim();
+            sources.Add(source);
+        }
+        Dictionary<string, string> linear = ToLinear(sources);
+        UserLinear(doc.Application);
         for (int k = found.Count - 1; k >= 0; k--)
         {
             System.Text.RegularExpressions.Match m = found[k];
@@ -1045,7 +1082,7 @@ static class Program
             string source = (display ? m.Groups[1].Value : m.Groups[2].Value).Trim();
             try
             {
-                if (BuildOne(doc, range, start, m, display, source)) made++;
+                if (BuildOne(doc, range, start, m, display, source, linear)) made++;
                 else MathFailed++;
             }
             catch (Exception) { MathFailed++; }
@@ -1131,33 +1168,169 @@ static class Program
         return note;
     }
 
-    static bool BuildOne(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m, bool display, string source)
+    // Word reads LaTeX itself once its equation input is switched to LaTeX (the "LaTeX" button on the Equation
+    // tab). The helper does that in a Word of its own (see MathSource), never in the one the user works in: there,
+    // each formula is read as LaTeX, and Word's own linear form of the result is what gets written into the document.
+
+    /// What Word's LaTeX reader does not take: dropped or rewritten before it sees the formula.
+    static string ForWord(string source)
     {
+        string s = source.Replace("\\displaystyle", "").Replace("\\textstyle", "").Replace("\\nolimits", "").Replace("\\limits", "");
+        s = s.Replace("\\dfrac", "\\frac").Replace("\\tfrac", "\\frac").Replace("\\lVert", "\\|").Replace("\\rVert", "\\|").Replace("\\lvert", "|").Replace("\\rvert", "|");
+        s = s.Replace("\\ne ", "\\neq ").Replace("\\le ", "\\leq ").Replace("\\ge ", "\\geq ").Replace("~", "\\ ");
+        // One double prime instead of two marks set apart.
+        s = s.Replace("\'\'\'", "‴").Replace("\'\'", "″");
+        return s.Trim();
+    }
+
+    static readonly System.Text.RegularExpressions.Regex Environments = new System.Text.RegularExpressions.Regex(@"\\begin\{(\w+\*?)\}");
+
+    /// Environments Word's LaTeX reader builds; the others (aligned, array ..) go through the helper's own conversion.
+    static bool WordReads(string source)
+    {
+        foreach (System.Text.RegularExpressions.Match m in Environments.Matches(source))
         {
-            // 	ag{1} numbers a display equation: Word sets "#(1)" flush right on the equation's line.
-            string tag = null;
-            System.Text.RegularExpressions.Match tagged = Tag.Match(source);
-            if (tagged.Success) { tag = tagged.Groups[1].Value.Trim(); source = source.Remove(tagged.Index, tagged.Length).Trim(); }
-            dynamic spot = null;
-            if (m.Length <= 250)
+            string name = m.Groups[1].Value;
+            if (name != "matrix" && name != "pmatrix" && name != "bmatrix" && name != "vmatrix" && name != "Vmatrix" && name != "cases") return false;
+        }
+        return true;
+    }
+
+    /// Left as it was typed: a command Word did not know, or a brace or ampersand that should have been consumed.
+    static bool Unbuilt(string built, string source)
+    {
+        if (built == null) return true;
+        if (built.IndexOf('\\') >= 0) return true;
+        if (built.IndexOf('&') >= 0 && source.IndexOf("\\&", StringComparison.Ordinal) < 0) return true;
+        if ((built.IndexOf('{') >= 0 || built.IndexOf('}') >= 0) && source.IndexOf("\\{", StringComparison.Ordinal) < 0 && source.IndexOf("\\}", StringComparison.Ordinal) < 0 && source.IndexOf("cases", StringComparison.Ordinal) < 0) return true;
+        return false;
+    }
+
+    /// LaTeX to Word's linear form, as read by Word; formulas met before are remembered. A formula Word cannot read
+    /// is missing from the result.
+    static readonly Dictionary<string, string> Read = new Dictionary<string, string>();
+
+    static Dictionary<string, string> ToLinear(List<string> sources)
+    {
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        List<string> fresh = new List<string>();
+        foreach (string source in sources)
+        {
+            string known;
+            if (Read.TryGetValue(source, out known)) { if (known != null) result[source] = known; }
+            else if (!fresh.Contains(source) && WordReads(source) && source.Length > 0) fresh.Add(source);
+        }
+        if (fresh.Count == 0 || !MathSource()) return result;
+        try
+        {
+            dynamic bars = MathWord.CommandBars;
+            MathDoc.Content.Delete();
+            for (int i = 0; i < fresh.Count; i++)
             {
-                // Found by its text: positions counted in the text are off wherever the range holds a field (a caption number).
-                dynamic search = range.Duplicate;
-                if ((bool)search.Find.Execute(FindText: m.Value.Replace("^", "^^"), MatchCase: true, MatchWildcards: false, Forward: true, Wrap: 0)) spot = search;
+                if (i > 0) MathDoc.Content.InsertParagraphAfter();
+                MathDoc.Paragraphs.Last.Range.InsertBefore(ForWord(fresh[i]));
             }
-            if (spot == null) spot = doc.Range(start + m.Index, start + m.Index + m.Length);
-            spot.Text = Tex(source) + (display && !string.IsNullOrEmpty(tag) ? "#(" + tag + ")" : "");
+            bool[] built = new bool[fresh.Count];
+            for (int i = 0; i < fresh.Count; i++)
+            {
+                try
+                {
+                    dynamic line = MathDoc.Paragraphs[i + 1].Range;
+                    line.MoveEnd(1, -1);
+                    dynamic math = MathDoc.OMaths.Add(line).OMaths[1];
+                    math.BuildUp();
+                    built[i] = !Unbuilt((string)MathDoc.Paragraphs[i + 1].Range.OMaths[1].Range.Text, fresh[i]);
+                }
+                catch (COMException) { built[i] = false; }
+            }
+            // Word's own linear form of what it built: that needs the linear input for a moment.
+            bars.ExecuteMso("EquationUnicodeFormat");
             try
             {
-                dynamic math = doc.OMaths.Add(spot);
-                math.OMaths[1].BuildUp();
-                if (display) { try { math.OMaths[1].Type = 0; math.OMaths[1].Justification = 1; } catch (COMException) { } }
-                if (display) { try { Displays.Add(math.OMaths[1].Range); } catch (Exception) { } }
-                Cramped = true;
-                return true;
+                for (int i = 0; i < fresh.Count; i++)
+                {
+                    string value = null;
+                    if (built[i])
+                    {
+                        try
+                        {
+                            dynamic line = MathDoc.Paragraphs[i + 1].Range;
+                            line.OMaths[1].Linearize();
+                            value = ((string)MathDoc.Paragraphs[i + 1].Range.OMaths[1].Range.Text ?? "").TrimEnd('\r');
+                            if (value.Length == 0) value = null;
+                        }
+                        catch (COMException) { value = null; }
+                    }
+                    Read[fresh[i]] = value;
+                    if (value != null) result[fresh[i]] = value;
+                }
             }
-            catch (COMException) { return false; }
+            finally { bars.ExecuteMso("EquationLaTexFormat"); }
         }
+        catch (Exception) { }
+        return result;
+    }
+
+    /// The document's own Word must be reading the linear form while equations are built in it. It is, unless the
+    /// user switched theirs to LaTeX: then it is switched for the batch and put back afterwards.
+    static int UserMode;   // 0 = not looked at, 1 = linear already, 2 = switched by us, 3 = could not tell
+
+    static void UserLinear(dynamic app)
+    {
+        if (UserMode != 0) return;
+        try
+        {
+            dynamic bars = app.CommandBars;
+            if (!(bool)bars.GetPressedMso("EquationLaTexFormat")) { UserMode = 1; return; }
+            bars.ExecuteMso("EquationUnicodeFormat");
+            UserMode = 2;
+        }
+        catch (Exception) { UserMode = 3; }
+    }
+
+    static bool BuildOne(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m, bool display, string source, Dictionary<string, string> linear)
+    {
+        // \tag{1} numbers a display equation: Word sets "#(1)" flush right on the equation's line.
+        string tag = null;
+        System.Text.RegularExpressions.Match tagged = Tag.Match(source);
+        if (tagged.Success) { tag = tagged.Groups[1].Value.Trim(); source = source.Remove(tagged.Index, tagged.Length).Trim(); }
+        if (!display) tag = null;
+        dynamic spot = null;
+        if (m.Length <= 250)
+        {
+            // Found by its text: positions counted in the text are off wherever the range holds a field (a caption number).
+            dynamic search = range.Duplicate;
+            if ((bool)search.Find.Execute(FindText: m.Value.Replace("^", "^^"), MatchCase: true, MatchWildcards: false, Forward: true, Wrap: 0)) spot = search;
+        }
+        if (spot == null) spot = doc.Range(start + m.Index, start + m.Index + m.Length);
+        string read;
+        bool byWord = linear.TryGetValue(source, out read);
+        // Not read by Word (an environment it lacks, a command it does not know): the helper's own conversion.
+        spot.Text = (byWord ? read : Tex(source)) + (string.IsNullOrEmpty(tag) ? "" : "#(" + tag + ")");
+        try
+        {
+            dynamic math = doc.OMaths.Add(spot);
+            dynamic built = math.OMaths[1];
+            built.BuildUp();
+            bool good = true;
+            if (!byWord) { try { good = ((string)math.OMaths[1].Range.Text ?? "").IndexOf('\\') < 0; } catch (COMException) { } }
+            if (display) { try { built.Type = 0; built.Justification = 1; } catch (COMException) { } }
+            if (display) { try { Displays.Add(built.Range); } catch (Exception) { } }
+            Cramped = true;
+            return good;
+        }
+        catch (COMException) { return false; }
+    }
+
+    /// End of a batch in Word: the user's equation input is put back if it had to be switched.
+    static void FinishMath(dynamic doc)
+    {
+        if (UserMode == 2)
+        {
+            try { dynamic bars = doc.Application.CommandBars; bars.ExecuteMso("EquationLaTexFormat"); }
+            catch (Exception) { }
+        }
+        UserMode = 0;
     }
 
     // ───────────────────────── Word ─────────────────────────
@@ -1586,13 +1759,49 @@ static class Program
             dynamic current = null;
             int made = 0, equations = 0, cites = 0;
             string lint = "";
+            Bag resume = null;
             foreach (object raw in items)
             {
                 Bag item = raw is string ? new Bag(new Dictionary<string, object> { { "text", raw } }) : new Bag(raw);
+                // A picture or a table written among the paragraphs goes in right there, in order.
+                string nested = item.Str("op", null);
+                if (nested == null && !item.Has("text")) nested = item.Has("path") ? "insert_image" : item.Has("data") ? "insert_table" : null;
+                if (nested == "insert_image" || nested == "insert_table")
+                {
+                    Dictionary<string, object> inner = item.Copy();
+                    inner.Remove("op"); inner.Remove("para"); inner.Remove("where"); inner.Remove("expect");
+                    Bag place = current != null ? null : resume ?? op;
+                    int before = (int)doc.Paragraphs.Count, tail;
+                    if (current != null) { int at = Index(doc, current); inner["para"] = at; inner["where"] = "after"; tail = before - at; }
+                    else
+                    {
+                        string where = place.Str("where", place.Has("para") ? "after" : "end");
+                        int para = place.Int("para", 1);
+                        if (place.Has("para")) inner["para"] = para;
+                        inner["where"] = where;
+                        if (place.Has("expect")) inner["expect"] = place.Raw("expect");
+                        tail = where == "end" || (before == 1 && (string)doc.Paragraphs[1].Range.Text == "\r") ? 0 : where == "start" ? before : where == "before" ? before - para + 1 : before - para;
+                    }
+                    WordOp(doc, nested, new Bag(inner));
+                    // Where the text goes on: after what was just put in.
+                    int end = (int)doc.Paragraphs.Count - tail;
+                    Dictionary<string, object> next = new Dictionary<string, object>();
+                    if (tail > 0)
+                    {
+                        bool inTable = false;
+                        try { inTable = Truthy(doc.Paragraphs[end].Range.Information[12]); } catch (Exception) { }
+                        next["para"] = inTable ? end + 1 : end;
+                        next["where"] = inTable ? "before" : "after";
+                    }
+                    resume = new Bag(next);
+                    current = null;
+                    made++;
+                    continue;
+                }
                 foreach (string text in Lines(item.Raw("text") ?? "").Split('\r'))
                 {
                     dynamic p;
-                    if (current == null) p = NewParagraph(doc, op);
+                    if (current == null) p = NewParagraph(doc, resume ?? op);
                     else p = After(doc, current);
                     string style = item.Str("style", op.Str("style", null));
                     if (style != null) Plain(p, style);
@@ -1697,7 +1906,7 @@ static class Program
                 table.Range.Cells.VerticalAlignment = 1;
             }
             catch (COMException) { }
-            table.Borders.Enable = 1;
+            Rules(table, op.Str("borders", "grid"));
             try { table.AutoFitBehavior(2); } catch (COMException) { }
             if (data != null)
             {
@@ -1759,7 +1968,7 @@ static class Program
             Follow(doc, p.Range);
             dynamic picture = p.Range.InlineShapes.AddPicture(FileName: path, LinkToFile: false, SaveWithDocument: true);
             Cramped = true;
-            if (op.Has("width")) { picture.LockAspectRatio = -1; picture.Width = (float)op.Num("width", 300); }
+            if (op.Has("width")) { picture.LockAspectRatio = -1; picture.Width = (float)op.Points("width", 300); }
             try { p.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; p.Range.ParagraphFormat.FirstLineIndent = 0; p.Range.ParagraphFormat.Alignment = 1; } catch (COMException) { }
             WordFormat(p.Range, StyleLess(op));
             p.Range.ParagraphFormat.SpaceBefore = Air;
@@ -1787,7 +1996,77 @@ static class Program
             return "page header set";
         }
         if (type == "update_fields") { Refresh(doc); return "table of contents and cross-references refreshed"; }
+        if (type == "format_table")
+        {
+            int n = op.Int("table", 1);
+            if (n < 1 || n > (int)doc.Tables.Count) throw new Fail("NOT_FOUND", "There is no table " + n + " (the document has " + (int)doc.Tables.Count + ").");
+            dynamic table = doc.Tables[n];
+            Follow(doc, table.Range);
+            if (op.Has("borders")) Rules(table, op.Need("borders"));
+            if (op.Has("font")) { string font = op.Need("font"); table.Range.Font.Name = font; try { table.Range.Font.NameFarEast = font; } catch (COMException) { } }
+            if (op.Has("latinFont")) { string latin = op.Need("latinFont"); try { table.Range.Font.NameAscii = latin; table.Range.Font.NameOther = latin; } catch (COMException) { } }
+            if (op.Has("size")) table.Range.Font.Size = (float)op.Num("size", 10.5);
+            if (op.Has("align")) { string align = op.Need("align"); table.Range.ParagraphFormat.Alignment = align == "center" ? 1 : align == "right" ? 2 : 0; }
+            if (op.Has("header")) table.Rows[1].Range.Font.Bold = op.Flag("header", true) ? 1 : 0;
+            if (op.Has("rowHeight")) { table.Rows.HeightRule = 1; table.Rows.Height = (float)op.Points("rowHeight", 20); }
+            if (op.Has("lineSpacing")) LineSpacing(table.Range.ParagraphFormat, op.Raw("lineSpacing"));
+            if (op.Has("autofit")) { string fit = op.Need("autofit"); try { table.AutoFitBehavior(fit == "content" ? 1 : fit == "fixed" ? 0 : 2); } catch (COMException) { } }
+            if (op.Has("keepTogether") && op.On("keepTogether"))
+            {
+                // Every row but the last stays with the next one, so the table is not split across two pages.
+                int rows = (int)table.Rows.Count;
+                for (int r = 1; r < rows; r++) { try { table.Rows[r].Range.ParagraphFormat.KeepWithNext = -1; } catch (COMException) { } }
+            }
+            return "table " + n + " formatted";
+        }
+        if (type == "set_image")
+        {
+            int total = (int)doc.InlineShapes.Count;
+            dynamic picture = null;
+            if (op.Has("para"))
+            {
+                dynamic range = Para(doc, op.Int("para", 1), null).Range;
+                if ((int)range.InlineShapes.Count == 0) throw new Fail("NOT_FOUND", "Paragraph " + op.Int("para", 1) + " holds no picture. Pictures show as \"/\" in office_read.");
+                picture = range.InlineShapes[1];
+            }
+            else
+            {
+                int n = op.Int("image", 1);
+                if (n < 1 || n > total) throw new Fail("NOT_FOUND", "There is no picture " + n + " (the document has " + total + ").");
+                picture = doc.InlineShapes[n];
+            }
+            Follow(doc, picture.Range);
+            picture.LockAspectRatio = -1;
+            if (op.Has("width")) picture.Width = (float)op.Points("width", 300);
+            if (op.Has("height")) picture.Height = (float)op.Points("height", 200);
+            if (op.Has("align")) { string align = op.Need("align"); picture.Range.ParagraphFormat.Alignment = align == "center" ? 1 : align == "right" ? 2 : 0; }
+            return "picture resized to " + Math.Round((double)picture.Width / 28.3465, 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + " × " + Math.Round((double)picture.Height / 28.3465, 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + " cm";
+        }
         throw new Fail("BAD_ARGS", "Unknown Word operation \"" + type + "\".");
+    }
+
+    /// The lines of a table: "grid" (all of them), "none", or "three-line" (三线表: a heavy rule above and below the
+    /// table, a light one under the header row, nothing else), the way tables are set in papers.
+    static void Rules(dynamic table, string style)
+    {
+        string kind = style.Trim().ToLowerInvariant();
+        if (kind == "grid" || kind == "all" || kind == "true") { table.Borders.Enable = 1; return; }
+        table.Borders.Enable = 0;
+        if (kind == "none" || kind == "false") return;
+        if (kind != "three-line" && kind != "threeline" && kind != "three_line" && kind != "booktabs" && kind != "三线表")
+            throw new Fail("BAD_ARGS", "\"borders\" must be grid, three-line or none.");
+        foreach (int side in new int[] { -1, -3 })
+        {
+            dynamic rule = table.Borders[side];
+            rule.LineStyle = 1;
+            rule.LineWidth = 12;
+        }
+        if ((int)table.Rows.Count > 1)
+        {
+            dynamic under = table.Rows[1].Borders[-3];
+            under.LineStyle = 1;
+            under.LineWidth = 6;
+        }
     }
 
     static Bag StyleLess(Bag source)
@@ -2425,9 +2704,142 @@ static class Program
 
     static void PptWrite(dynamic textRange, string text)
     {
-        if (!Typing || text.Length < 4) { textRange.Text = text; return; }
-        textRange.Text = "";
-        foreach (string piece in Pieces(text)) { textRange.InsertAfter(piece); Thread.Sleep(14); }
+        if (!Typing || text.Length < 4) textRange.Text = text;
+        else
+        {
+            textRange.Text = "";
+            foreach (string piece in Pieces(text)) { textRange.InsertAfter(piece); Thread.Sleep(14); }
+        }
+        if (text.IndexOf('$') >= 0) PptMath(textRange);
+    }
+
+    // PowerPoint shows native equations but has no call to make one. Word has: the formula is built in a hidden
+    // scratch document there and carried over through the clipboard, which gives PowerPoint's own editable equation.
+    // The user's clipboard is put back when the batch is over.
+
+    static dynamic MathWord, MathDoc;
+    static bool MathReads, MathWasLatex, ClipTaken;
+    static IDataObject ClipSaved;
+    static int PptMathFailed;
+
+    /// A Word of our own, never shown, kept for as long as the helper runs: the formulas are built there, so the
+    /// Word the user works in is left alone.
+    static bool MathSource()
+    {
+        if (MathDoc != null) return MathReads;
+        try
+        {
+            if (MathWord == null)
+            {
+                MathWord = Activator.CreateInstance(Type.GetTypeFromProgID("Word.Application"));
+                MathWord.Visible = false;
+                try { MathWord.DisplayAlerts = 0; } catch (Exception) { }
+            }
+            MathDoc = MathWord.Documents.Add();
+            // Nothing in this scratch document is to be "corrected" on the way.
+            try { MathWord.Options.AutoFormatAsYouTypeReplaceQuotes = false; } catch (Exception) { }
+            dynamic bars = MathWord.CommandBars;
+            MathWasLatex = (bool)bars.GetPressedMso("EquationLaTexFormat");
+            if (!MathWasLatex) bars.ExecuteMso("EquationLaTexFormat");
+            MathReads = (bool)bars.GetPressedMso("EquationLaTexFormat");
+        }
+        catch (Exception) { MathReads = false; }
+        return MathReads && MathDoc != null;
+    }
+
+    static void SaveClipboard()
+    {
+        if (ClipTaken) return;
+        ClipTaken = true;
+        ClipSaved = null;
+        try
+        {
+            IDataObject now = Clipboard.GetDataObject();
+            if (now == null) return;
+            DataObject copy = new DataObject();
+            bool any = false;
+            foreach (string format in new string[] { DataFormats.UnicodeText, DataFormats.Text, DataFormats.Html, DataFormats.Rtf, DataFormats.Bitmap, DataFormats.FileDrop })
+            {
+                if (!now.GetDataPresent(format)) continue;
+                object value = now.GetData(format);
+                if (value == null) continue;
+                copy.SetData(format, value);
+                any = true;
+            }
+            if (any) ClipSaved = copy;
+        }
+        catch (Exception) { ClipSaved = null; }
+    }
+
+    /// End of a batch: the scratch document goes, the equation input of that Word is put back, and so is the clipboard.
+    static void MathDone()
+    {
+        if (MathDoc != null)
+        {
+            try
+            {
+                dynamic bars = MathWord.CommandBars;
+                if (!MathWasLatex && !(bool)bars.GetPressedMso("EquationUnicodeFormat")) bars.ExecuteMso("EquationUnicodeFormat");
+            }
+            catch (Exception) { }
+            try { MathDoc.Close(SaveChanges: 0); } catch (Exception) { }
+        }
+        MathDoc = null;
+        if (ClipTaken)
+        {
+            ClipTaken = false;
+            try { if (ClipSaved != null) Clipboard.SetDataObject(ClipSaved, true); else Clipboard.Clear(); }
+            catch (Exception) { }
+            ClipSaved = null;
+        }
+    }
+
+    /// The helper is going: so does its Word.
+    static void MathQuit()
+    {
+        try { MathDone(); } catch (Exception) { }
+        if (MathWord != null) { try { MathWord.Quit(SaveChanges: 0); } catch (Exception) { } }
+        MathWord = null;
+    }
+
+    /// $...$ in the text of a shape become native equations, in place.
+    static int PptMath(dynamic textRange)
+    {
+        string text = (string)textRange.Text;
+        if (text == null || text.IndexOf('$') < 0) return 0;
+        System.Text.RegularExpressions.MatchCollection found = Dollars.Matches(text);
+        if (found.Count == 0) return 0;
+        if (!MathSource()) { PptMathFailed += found.Count; return 0; }
+        SaveClipboard();
+        int made = 0;
+        for (int k = found.Count - 1; k >= 0; k--)
+        {
+            System.Text.RegularExpressions.Match m = found[k];
+            string source = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+            System.Text.RegularExpressions.Match tagged = Tag.Match(source);
+            if (tagged.Success) source = source.Remove(tagged.Index, tagged.Length).Trim();
+            try
+            {
+                if (!WordReads(source)) { PptMathFailed++; continue; }
+                string latex = ForWord(source);
+                MathDoc.Content.Delete();
+                MathDoc.Content.InsertBefore(latex);
+                dynamic built = MathDoc.OMaths.Add(MathDoc.Range(0, latex.Length)).OMaths[1];
+                built.BuildUp();
+                dynamic equation = MathDoc.OMaths[1].Range;
+                if (Unbuilt((string)equation.Text, source)) { PptMathFailed++; continue; }
+                dynamic spot = textRange.Characters(m.Index + 1, m.Length);
+                bool pasted = false;
+                for (int attempt = 0; attempt < 3 && !pasted; attempt++)
+                {
+                    try { equation.Copy(); spot.Paste(); pasted = true; }
+                    catch (COMException) { Thread.Sleep(80); }
+                }
+                if (pasted) made++; else PptMathFailed++;
+            }
+            catch (Exception) { PptMathFailed++; }
+        }
+        return made;
     }
 
     static void GoTo(dynamic deck, int slide)
@@ -2564,6 +2976,17 @@ static class Program
         }
         finally
         {
+            if (kind == "ppt")
+            {
+                try { MathDone(); } catch (Exception) { }
+                if (PptMathFailed > 0) done.Add("(NOTE " + PptMathFailed + " formula(s) could not be built and were left as text between dollar signs: rewrite them more simply)");
+                PptMathFailed = 0;
+            }
+            if (kind == "word")
+            {
+                try { FinishMath(doc); } catch (Exception) { }
+                try { MathDone(); } catch (Exception) { }
+            }
             if (kind == "word" && Cramped)
             {
                 int roomy = Roomy(doc);
