@@ -3209,10 +3209,10 @@ static class Program
         foreach (object raw in nodes) { Bag n = new Bag(raw); rows = Math.Max(rows, n.Int("row", 1)); cols = Math.Max(cols, n.Int("col", 1)); }
         double cellW = Math.Min(op.Points("cellWidth", 150), (room - 4) / Math.Max(1, cols)), cellH = op.Points("cellHeight", 76);
         double nodeW = Math.Min(op.Points("nodeWidth", 112), cellW - 26), nodeH = Math.Min(op.Points("nodeHeight", 40), cellH - 26);
-        // The look. "modern" (the default): flat tinted boxes without heavy outlines, start and end in the accent
-        // colour, decisions in a warm tone, thin grey connectors, a sans type. "outline": white boxes with thin black
-        // lines in the type of the text, as papers and theses print them. "classic": pale blue with dark outlines.
-        string look = op.Str("style", "modern").ToLowerInvariant();
+        // The look. "outline" (the default): white boxes with thin black lines in the type of the text, as papers and
+        // theses print them. "modern": flat tinted boxes without heavy outlines, start and end in the accent colour,
+        // decisions in a warm tone, thin grey connectors, a sans type. "classic": pale blue with dark outlines.
+        string look = op.Str("style", "outline").ToLowerInvariant();
         if (look != "modern" && look != "outline" && look != "classic") throw new Fail("BAD_ARGS", "\"style\" of a diagram is modern, outline or classic.");
         string accent = op.Str("accent", "#3B6FD9");
         float size = (float)op.Num("size", look == "modern" ? 10 : 10.5);
