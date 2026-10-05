@@ -153,7 +153,7 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
               : `运行中：${app.documents.map(doc => doc.name + (doc.saved ? '' : '（未保存）')).join('、')}`),
         )),
       h('div', { style: S.toggleRow },
-        h('div', { style: S.toggleText }, '办公套件', h('span', { style: { ...S.hint, fontWeight: 400 } }, '新打开的文件用哪个软件。“自动”：装了微软 Office 就用它，否则用 WPS。已经打开着的文档始终在它所在的软件里修改。WPS 演示里公式暂时不会排成公式，保留为文本。')),
+        h('div', { style: S.toggleText }, '办公套件', h('span', { style: { ...S.hint, fontWeight: 400 } }, '新打开的文件用哪个软件。“自动”：装了微软 Office 就用它，否则用 WPS。已经打开着的文档始终在它所在的软件里修改。WPS 文字里的公式是可编辑的原生公式；WPS 演示不支持插入公式，那里的公式是叠在文字上的矢量图片，不能编辑，移动文本框后需要让 AI 重写该文本。幻灯片里公式多的话，推荐用 PowerPoint。')),
         h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } }, SUITES.map(([value, label]) => h('button', {
           key: value, type: 'button', disabled, onClick: () => { void change('suite', value) },
           style: { ...S.secondary, ...(settings.suite === value ? { background: ACCENT, color: '#fff', borderColor: ACCENT } : {}) },

@@ -205,7 +205,14 @@ export function formulasOf(value: unknown, found: Record<string, string> = {}): 
   } else if (Array.isArray(value)) {
     for (const item of value) formulasOf(item, found)
   } else if (value !== null && typeof value === 'object') {
-    for (const item of Object.values(value)) formulasOf(item, found)
+    for (const [name, item] of Object.entries(value)) {
+      // A formula in a field of its own (the cards of a formula slide) is written without dollar signs.
+      if (name === 'latex' && typeof item === 'string') {
+        const source = item.trim().replace(/^\$+|\$+$/g, '').trim()
+        const omml = source.length === 0 || found[`d:${source}`] !== undefined ? undefined : latexToOmml(source, true)
+        if (omml !== undefined) found[`d:${source}`] = omml
+      } else formulasOf(item, found)
+    }
   }
   return found
 }

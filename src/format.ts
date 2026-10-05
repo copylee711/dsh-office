@@ -37,7 +37,7 @@ export function formatStatus(apps: AppStatus[]): string {
 
 export function formatOpened(doc: DocInfo): string {
   const how = doc.how === 'created' ? 'Created' : doc.how === 'opened' ? 'Opened' : 'Already open, attached to'
-  return `${how} ${doc.path ?? doc.name} in ${appName(doc)} (${state(doc)}).${doc.suite === 'wps' ? ` This is WPS Office: the same tools and operations apply${doc.app === 'ppt' ? ',' : ''}${doc.app === 'ppt' ? ' except that formulas ($...$) on slides are not built into equations there yet — they stay as text; say so to the user if the deck has formulas' : ''}.` : ''}${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
+  return `${how} ${doc.path ?? doc.name} in ${appName(doc)} (${state(doc)}).${doc.suite === 'wps' ? ` This is WPS Office: the same tools and operations apply${doc.app === 'ppt' ? ',' : ''}${doc.app === 'ppt' ? ' except that a formula ($...$) on a slide is a picture laid over blanks kept for it in the text, not an equation the user can edit: after you move, resize or rewrite a text shape that has formulas, write its text again (set_text) so they are placed anew, and look at the slide (office_render)' : ''}.` : ''}${doc.readOnly ? ' It is read-only: edits cannot be saved to this file.' : ''}`
 }
 
 const BODY_STYLES = new Set(['normal', '正文', 'body text'])
