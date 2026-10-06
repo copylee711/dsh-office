@@ -155,8 +155,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') retire(agent) })
   ctx.on('agent/disposed', ({ agent }) => { retire(agent) })
 
+  // The host's file-based Office skills tell the model to build the file with a script. The first time one is
+  // loaded in a session, the model gets this plugin's short skill instead, as the ordinary result of the call:
+  // the skill itself still loads (so the result has the shape the host expects), only what the model reads is
+  // replaced. A refusal would do the same job but shows the user a red error at the start of every session.
   const redirected = new Set<string>()
-  ctx.on('tools/pre-execute', async (exec, next) => {
+  ctx.on('tools/execute', async (exec, next) => {
     if (exec.name !== 'skill' || !settings().preferLive) return next()
     const skill = String((exec.arguments as { name?: unknown } | undefined)?.name ?? '')
     const app = FILE_SKILLS[skill]
@@ -164,8 +168,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     const session = (exec.agent as { session?: { id?: string } } | undefined)?.session?.id ?? 'default'
     const key = `${session}:${skill}`
     if (redirected.has(key) || !(await installedApps()).has(app)) return next()
+    const loaded = await next()
+    if (loaded.isError) return loaded
     redirected.add(key)
-    return { kind: 'deny', reason: redirectText(skill, app) }
+    return { ...loaded, content: [{ type: 'text', text: redirectText(skill, app) }] }
   })
 
   // Settings page bridge (which apps are installed and what is open); optional so headless hosts still load.

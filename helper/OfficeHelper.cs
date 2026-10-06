@@ -656,7 +656,7 @@ static class Program
         }
         if (doc == null)
         {
-            if (path != null && !File.Exists(path) && !Directory.Exists(Path.GetDirectoryName(path))) throw new Fail("BAD_ARGS", "The folder of \"" + path + "\" does not exist.");
+            if (path != null && !File.Exists(path) && !Directory.Exists(Path.GetDirectoryName(path))) MakeFolder(path);
             bool exists = path != null && File.Exists(path);
             if (kind == "ppt")
             {
@@ -1010,7 +1010,7 @@ static class Program
             }
             else
             {
-                if (path != null && !Directory.Exists(Path.GetDirectoryName(path))) throw new Fail("BAD_ARGS", "The folder of \"" + path + "\" does not exist.");
+                if (path != null && !Directory.Exists(Path.GetDirectoryName(path))) MakeFolder(path);
                 doc = kind == "ppt" ? docs.Add(-1) : docs.Add();
                 how = "created";
                 if (path != null) SaveAs(kind, app, doc, path);
@@ -1078,7 +1078,7 @@ static class Program
         {
             if (!Path.IsPathRooted(path)) throw new Fail("BAD_ARGS", "\"path\" must be an absolute path.");
             path = Path.GetFullPath(path);
-            if (!Directory.Exists(Path.GetDirectoryName(path))) throw new Fail("BAD_ARGS", "The folder of \"" + path + "\" does not exist.");
+            if (!Directory.Exists(Path.GetDirectoryName(path))) MakeFolder(path);
             SaveAs(kind, app, doc, path);
             result["path"] = path;
         }
@@ -1231,6 +1231,13 @@ static class Program
             return true;
         }, IntPtr.Zero);
         return best;
+    }
+
+    /// The folder a new document is to go into, made when it is not there yet.
+    static void MakeFolder(string path)
+    {
+        try { Directory.CreateDirectory(Path.GetDirectoryName(path)); }
+        catch (Exception error) { throw new Fail("BAD_ARGS", "The folder of \"" + path + "\" does not exist and could not be made: " + error.Message.Trim()); }
     }
 
     static void Remember(dynamic doc)
@@ -6915,17 +6922,37 @@ static class Program
             {
                 // A chart or diagram is not cropped to fill the slide: it is shown whole, as large as the slide lets it be.
                 string words = op.Str("text", null), under = op.Str("caption", null);
-                double top = Head(p, op), foot = (string.IsNullOrEmpty(words) ? 0 : 46) + (string.IsNullOrEmpty(under) ? 0 : 20);
+                // The sentence under the figure may run over two lines: it gets the room it needs, and stands clear of the caption.
+                double wordsHigh = string.IsNullOrEmpty(words) ? 0 : Math.Min(3, Math.Max(1, Math.Ceiling(Wide(words) * 15 * 1.04 / 864))) * 22 + 6;
+                double top = Head(p, op), foot = (string.IsNullOrEmpty(words) ? 0 : wordsHigh + 12) + (string.IsNullOrEmpty(under) ? 0 : 24);
                 p.Current = null;
                 Unit(p);
+                const string redraw = " — NOTE this is a picture of a plot: where the numbers are yours, a chart slide (column, line, curve, scatter) draws it in the deck itself, larger, sharper and in the deck's type and colours; several panels in one picture each come out small, give them a slide each or a gallery";
+                double shape = Aspect(image);
+                if (shape > 0 && shape < 1.3 && !string.IsNullOrEmpty(words))
+                {
+                    // A figure about as tall as it is wide would stand small in the middle of a wide slide with empty
+                    // sides: it takes the full height at the left, and the sentence stands beside it.
+                    double high = BodyBottom - top - (string.IsNullOrEmpty(under) ? 0 : 24), wide = Math.Min(540, Math.Max(380, high * shape + 20));
+                    p.Motion.Add(Figure(p, 48, top, wide, high, image));
+                    if (!string.IsNullOrEmpty(under)) Label(p, 48, top + high + 4, wide, 16, under, 10.5, t.Muted, false, t.BodyFont, 2, 1, null).Name = "Caption";
+                    double tx = 48 + wide + 32, tw = 912 - tx;
+                    Unit(p);
+                    Block(p, tx, top + high / 2 - 70, 40, 4, t.Accent, false);
+                    Label(p, tx, top + high / 2 - 56, tw, 200, words, 17, t.Text, false, t.BodyFont, 1, 1, t.Accent).Name = "Text";
+                    if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
+                    Move(p);
+                    Renumber = true;
+                    return "slide " + index + " added (image, theme " + t.Name + ")" + redraw + SmallNote();
+                }
                 p.Motion.Add(Figure(p, 48, top, 864, BodyBottom - top - foot, image));
                 double fy = BodyBottom - foot;
-                if (!string.IsNullOrEmpty(under)) { Label(p, 48, fy + 2, 864, 16, under, 10.5, t.Muted, false, t.BodyFont, 2, 1, null).Name = "Caption"; fy += 20; }
-                if (!string.IsNullOrEmpty(words)) { Unit(p); Label(p, 48, fy + 4, 864, 40, words, 15, t.Text, false, t.BodyFont, 2, 3, t.Accent).Name = "Text"; }
+                if (!string.IsNullOrEmpty(under)) { Label(p, 48, fy + 4, 864, 16, under, 10.5, t.Muted, false, t.BodyFont, 2, 1, null).Name = "Caption"; fy += 24; }
+                if (!string.IsNullOrEmpty(words)) { Unit(p); Label(p, 48, fy + 12, 864, wordsHigh, words, 15, t.Text, false, t.BodyFont, 2, 1, t.Accent).Name = "Text"; }
                 if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
                 Move(p);
                 Renumber = true;
-                return "slide " + index + " added (image, theme " + t.Name + ")" + SmallNote();
+                return "slide " + index + " added (image, theme " + t.Name + ")" + redraw + SmallNote();
             }
             Photo(p, 0, 0, 960, 540, image);
             Veil(p, 0, 230, 960, 310, "#000000", 2, 0, 0.82);
@@ -7364,6 +7391,91 @@ static class Program
         IList points = Items(op, "points");
         int n = Math.Max(1, Math.Min(formulas.Count, 3));
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        // Three arrangements, so formula slides do not all look alike: "focus" sets one formula large on a band
+        // with its remarks in columns under it; "side" stands the formulas at the left and the remarks beside them,
+        // one to a formula where they pair up; "stack" is formulas over remarks. Unless told, one formula is
+        // focus, two with remarks are side, the rest stack.
+        int longest = 0;
+        for (int i = 0; i < n; i++) longest = Math.Max(longest, (Field(formulas[i], "latex") ?? Field(formulas[i], "text") ?? "").Length);
+        int remarks = Math.Min(points.Count, 4);
+        string layout = op.Str("layout", n == 1 ? "focus" : n == 2 && remarks >= 2 && longest <= 90 ? "side" : "stack").ToLowerInvariant();
+        if (layout != "focus" && layout != "side" && layout != "stack") throw new Fail("BAD_ARGS", "\"layout\" of a formula slide is focus, side or stack.");
+        if (layout == "focus" && n != 1) layout = "stack";
+        if (layout == "side" && remarks == 0) layout = "stack";
+        double bodyHigh = h - (callout ? 54 : 0);
+        if (layout == "focus")
+        {
+            string tex = (Field(formulas[0], "latex") ?? Field(formulas[0], "text") ?? "").Trim().Trim('$'), label = Field(formulas[0], "label");
+            double big = tex.Length > 70 ? 24 : 30;
+            double band = Math.Max(118, Math.Min(200, Tall(tex) * big + 56 + (label != null ? 18 : 0)));
+            double under = remarks > 0 ? 28 + 104 : 0;
+            double top = Settle(y, bodyHigh, band + under);
+            Unit(p);
+            dynamic back = Block(p, x, top, w, band, t.Surface, true);
+            Block(p, x + 22, top, 40, 4, t.Accent, false);
+            if (label != null) Label(p, x + 22, top + 14, w - 44, 16, label, 11.5, t.Muted, false, t.BodyFont, 1, 1, null);
+            dynamic formula = Label(p, x + 18, top + (label != null ? 22 : 0), w - 36, band - (label != null ? 22 : 0), '$' + tex + '$', big, t.Text, false, "Cambria Math", 2, 3, null);
+            formula.Name = "Formula 1";
+            p.Motion.Add(formula);
+            double gap = 24, cw = remarks == 0 ? 0 : (w - gap * (remarks - 1)) / remarks, cy0 = top + band + 28;
+            for (int i = 0; i < remarks; i++)
+            {
+                Unit(p);
+                double cx = x + i * (cw + gap);
+                string head = Field(points[i], "head"), text = Field(points[i], "text") ?? "";
+                Rule(p, cx, cy0, cx + cw, cy0, Pick(p, i), 1.5);
+                if (head != null) { Words(p, cx, cy0 + 10, cw, 24, head, 15, t.Text, true); p.Motion.Add(Words(p, cx, cy0 + 38, cw, 62, text, 13, t.Muted, false)); }
+                else p.Motion.Add(Words(p, cx, cy0 + 12, cw, 88, text, 14, t.Text, false));
+            }
+            Callout(p, op, x, y + h - 42, w);
+            return;
+        }
+        if (layout == "side")
+        {
+            double fw = Math.Round(w * 0.56), big = 23, total, between = 16;
+            double[] high = new double[n];
+            while (true)
+            {
+                total = between * (n - 1);
+                for (int i = 0; i < n; i++)
+                {
+                    string tex = Field(formulas[i], "latex") ?? Field(formulas[i], "text") ?? "";
+                    high[i] = Math.Max(112, (Field(formulas[i], "label") != null ? 22 : 0) + Tall(tex) * big + 44);
+                    total += high[i];
+                }
+                if (total <= bodyHigh || big <= 14) break;
+                big -= 1;
+            }
+            double top = Settle(y, bodyHigh, total), cy1 = top;
+            double[] tops = new double[n];
+            for (int i = 0; i < n; i++)
+            {
+                Unit(p);
+                string tex = (Field(formulas[i], "latex") ?? Field(formulas[i], "text") ?? "").Trim().Trim('$'), label = Field(formulas[i], "label");
+                tops[i] = cy1;
+                Block(p, x, cy1, fw, high[i], t.Surface, true);
+                Block(p, x + 18, cy1, 36, 4, Pick(p, i), false);
+                if (label != null) Label(p, x + 18, cy1 + 12, fw - 36, 16, label, 11, t.Muted, false, t.BodyFont, 1, 1, null);
+                dynamic formula = Label(p, x + 12, cy1 + (label != null ? 22 : 0), fw - 24, high[i] - (label != null ? 22 : 0), '$' + tex + '$', big, t.Text, false, "Cambria Math", 2, 3, null);
+                formula.Name = "Formula " + (i + 1);
+                p.Motion.Add(formula);
+                cy1 += high[i] + between;
+            }
+            // The remarks: beside their formula when there is one for each, otherwise shared out over the same height.
+            double px = x + fw + 30, pw = w - fw - 30;
+            bool paired = remarks == n;
+            for (int i = 0; i < remarks; i++)
+            {
+                Unit(p);
+                double slotTop = paired ? tops[i] : top + i * (total / remarks), slot = paired ? high[i] : total / remarks;
+                string head = Field(points[i], "head"), text = Field(points[i], "text") ?? "";
+                Block(p, px, slotTop + 6, 3, slot - 12, Pick(p, i), false);
+                if (head != null) { Words(p, px + 16, slotTop + 4, pw - 16, 24, head, 15, t.Text, true); p.Motion.Add(Label(p, px + 16, slotTop + 30, pw - 16, slot - 34, text, 13, t.Muted, false, t.BodyFont, 1, 1, t.Accent)); }
+                else p.Motion.Add(Label(p, px + 16, slotTop, pw - 16, slot, text, 14, t.Text, false, t.BodyFont, 1, 3, t.Accent));
+            }
+            Callout(p, op, x, y + h - 42, w);
+            return;
+        }
         double textHeight = Math.Min(points.Count, 4) * 36 + (callout ? 54 : 0) + 8;
         // Each card is as high as its formula stands: a sum with limits or a fraction needs more than a plain line.
         double size = n == 1 ? 26 : 22, room = h - textHeight - 8 * (n - 1) - 6, sum;

@@ -144,6 +144,7 @@ describe('office tools', () => {
     expect(sheets.text).toContain('pivot {')
     expect((await run('office_help', { app: 'word' })).text).toContain('insert_diagram {')
     expect((await run('office_help', { app: 'ppt' })).text).toContain('grid {title, rows')
+    expect((await run('office_help', { app: 'ppt' })).text).toContain('layout?: focus|side|stack')
     expect(sheets.text).toContain('clean {')
   })
 
