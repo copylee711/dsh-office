@@ -63,8 +63,8 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Whole-document visual check: on save, show the AI every page if it has not looked since its last edits' },
   }),
   preferLive: z.boolean().default(true).volatile().i18n({
-    'zh-CN': { $description: '优先在真实 Office 里操作：AI 想加载 DSH 自带的 office-docx / xlsx / pptx 技能（用脚本改文件）时，先把它引回本插件' },
-    'en-US': { $description: 'Prefer the real Office app: when the AI reaches for the host\'s file-based office skills, point it back to this plugin first' },
+    'zh-CN': { $description: '优先在真实 Office 里操作：AI 想加载 DSH 自带的 office-docx / office-pptx 技能（用脚本改文件）时，先把它引回本插件；表格的 office-xlsx 技能照常加载' },
+    'en-US': { $description: 'Prefer the real Office app: when the AI reaches for the host\'s file-based office-docx / office-pptx skills, point it back to this plugin first; office-xlsx loads as usual' },
   }),
   showOnOpen: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '打开文档时把它的窗口带到前台' },

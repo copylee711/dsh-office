@@ -185,7 +185,7 @@ function OfficeSection({ ctx }: { ctx: ClientContext }) {
         h(Switch, { checked: settings.finalCheck, disabled, label: '交付前整体视觉检查', onChange: value => { void change('finalCheck', value) } }),
       ),
       h('div', { style: S.toggleRow },
-        h('div', { style: S.toggleText }, '优先在真实 Office 里操作', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'DSH 自带的 office-docx / office-xlsx / office-pptx 技能是用脚本生成文件，你看不到过程，公式和排版也由脚本决定。开启后，AI 第一次想加载这些技能时会被引回本插件（对应的 Office 应用已安装时才拦）；它确有需要而再次请求时放行。')),
+        h('div', { style: S.toggleText }, '优先在真实 Office 里操作', h('span', { style: { ...S.hint, fontWeight: 400 } }, 'DSH 自带的 office-docx / office-pptx 技能是用脚本生成文件，你看不到过程，公式和排版也由脚本决定。开启后，AI 第一次想加载这些技能时会被引回本插件（对应的 Office 应用已安装时才拦）；它确有需要而再次请求时放行。表格不在此列：数据分析默认用代码和自带的 office-xlsx 技能，你指明要在 Excel 或 WPS 表格里做时，AI 才在窗口里操作。')),
         h(Switch, { checked: settings.preferLive, disabled, label: '优先在真实 Office 里操作', onChange: value => { void change('preferLive', value) } }),
       ),
       h('div', { style: S.toggleRow },
