@@ -1791,10 +1791,48 @@ static class Program
     // tab). The helper does that in a Word of its own (see MathSource), never in the one the user works in: there,
     // each formula is read as LaTeX, and Word's own linear form of the result is what gets written into the document.
 
+    static readonly System.Text.RegularExpressions.Regex UprightRun = new System.Text.RegularExpressions.Regex(@"(?<!\\)(?<![A-Za-z])[A-Za-z%°µμΩ][A-Za-z%°µμΩ/]*");
+
+    /// \mathrm{mm}, \mathrm{m/s}, \mathrm{m\cdot s^{-1}}: units, mostly. Upright letters do not survive the way a
+    /// formula reaches the document (Word's linear form keeps no typeface, so they come out italic, and the slash of
+    /// m/s becomes a fraction bar). Text does survive it: the letters are handed over as \text{..}, and whatever
+    /// stands between them (\cdot, a power) stays mathematics.
+    static string Upright(string source)
+    {
+        const string command = "\\mathrm{";
+        int at = source.IndexOf(command, StringComparison.Ordinal);
+        if (at < 0) return source;
+        System.Text.StringBuilder made = new System.Text.StringBuilder();
+        int from = 0;
+        while (at >= 0)
+        {
+            int open = at + command.Length, depth = 1, close = open;
+            while (close < source.Length && depth > 0)
+            {
+                char c = source[close];
+                if (c == '\\') { close += 2; continue; }
+                if (c == '{') depth++; else if (c == '}') depth--;
+                if (depth > 0) close++;
+            }
+            if (depth != 0 || close > source.Length) break;
+            made.Append(source, from, at - from);
+            string inner = Upright(source.Substring(open, close - open));
+            // The micro and ohm of a unit are letters of it (μs, kΩ), not symbols standing by themselves.
+            inner = System.Text.RegularExpressions.Regex.Replace(inner, @"\\mu(?![A-Za-z])\s*", "μ");
+            inner = System.Text.RegularExpressions.Regex.Replace(inner, @"\\Omega(?![A-Za-z])\s*", "Ω");
+            // A command (\cdot) is not letters to set upright: the look-behinds skip its name.
+            made.Append('{').Append(UprightRun.Replace(inner, new System.Text.RegularExpressions.MatchEvaluator(delegate(System.Text.RegularExpressions.Match m) { return "\\text{" + m.Value + "}"; }))).Append('}');
+            from = close + 1;
+            at = source.IndexOf(command, from, StringComparison.Ordinal);
+        }
+        made.Append(source, from, source.Length - from);
+        return made.ToString();
+    }
+
     /// What Word's LaTeX reader does not take: dropped or rewritten before it sees the formula.
     static string ForWord(string source)
     {
-        string s = source.Replace("\\displaystyle", "").Replace("\\textstyle", "").Replace("\\nolimits", "").Replace("\\limits", "");
+        string s = Upright(source).Replace("\\displaystyle", "").Replace("\\textstyle", "").Replace("\\nolimits", "").Replace("\\limits", "");
         s = s.Replace("\\dfrac", "\\frac").Replace("\\tfrac", "\\frac").Replace("\\lVert", "\\|").Replace("\\rVert", "\\|").Replace("\\lvert", "|").Replace("\\rvert", "|");
         s = s.Replace("\\ne ", "\\neq ").Replace("\\le ", "\\leq ").Replace("\\ge ", "\\geq ").Replace("~", "\\ ");
         // One double prime instead of two marks set apart.
@@ -2496,6 +2534,166 @@ static class Program
 
     /// A figure or table that does not fit under the text before it goes to the next page and leaves the rest of
     /// the page empty. As a typesetter would, the paragraphs that follow it are brought before it until the page is full.
+    static void EveryTable(dynamic tables, List<object> found, int depth)
+    {
+        int count = (int)tables.Count;
+        for (int i = 1; i <= count; i++)
+        {
+            dynamic table = tables[i];
+            found.Add(table);
+            if (depth < 8) { try { EveryTable(table.Tables, found, depth + 1); } catch (COMException) { } }
+        }
+    }
+
+    static bool OnOnePage(dynamic doc, dynamic table)
+    {
+        int start = (int)table.Range.Start, end = (int)table.Range.End;
+        return (int)doc.Range(end - 1, end - 1).Information[3] <= (int)doc.Range(start, start).Information[3];
+    }
+
+    /// How many rows of the table stand on the page it begins on.
+    static int RowsOnFirstPage(dynamic doc, dynamic table, int rows)
+    {
+        int first = (int)doc.Range(table.Range.Start, table.Range.Start).Information[3], count = 0;
+        for (int r = 1; r <= rows; r++)
+        {
+            int at = (int)table.Rows[r].Range.Start;
+            if ((int)doc.Range(at, at).Information[3] != first) break;
+            count++;
+        }
+        return count;
+    }
+
+    /// 0 = fine; 1 = only the header row, or it and one more, are left at the foot of the page; 2 = a single row
+    /// went over to the next page. A table may well run over a page: what looks wrong is a row cut off by itself.
+    static int Stranded(dynamic doc, dynamic table, int rows)
+    {
+        if (OnOnePage(doc, table)) return 0;
+        int first = RowsOnFirstPage(doc, table, rows);
+        if (first <= 2 && rows - first >= 1) return 1;
+        if (rows - first <= 1) return 2;
+        return 0;
+    }
+
+    /// Pushes a table down by empty lines, with its caption and the heading above it, until no row of it is cut off by
+    /// itself (or, with "whole", until it stands on one page). The number of lines put in; 0 when that did not help
+    /// (they are taken out again); -1, and nothing done, when it would leave more of the page empty than "most".
+    static int PushDown(dynamic doc, dynamic table, int rows, bool whole, double most, out double gap)
+    {
+        gap = 0;
+        int block = (int)table.Range.Start;
+        // What goes down with the table: its caption, and a heading that would otherwise be left behind.
+        for (int up = 0; up < 2 && block > 0; up++)
+        {
+            dynamic above = doc.Range(block - 1, block - 1).Paragraphs[1];
+            string text = ((string)above.Range.Text ?? "").Trim();
+            bool tied = false;
+            try { tied = text.Length > 0 && text.Length < 80 && ((int)above.OutlineLevel < 10 || (int)above.Format.KeepWithNext != 0 || IsCaption(doc, above)); } catch (Exception) { }
+            if (!tied) break;
+            block = (int)above.Range.Start;
+        }
+        try
+        {
+            dynamic page = doc.Range(block, block).Sections[1].PageSetup;
+            double height = (double)(float)page.PageHeight, foot = (double)(float)page.BottomMargin, head = (double)(float)page.TopMargin;
+            double y = Convert.ToDouble(doc.Range(block, block).Information[6]);
+            if (height - foot - head > 50) gap = Math.Max(0, (height - foot - y) / (height - foot - head));
+        }
+        catch (Exception) { }
+        if (gap > most) return -1;
+        int added = 0;
+        bool done = false;
+        while (added < 45 && !done)
+        {
+            doc.Range(block, block).InsertBefore("\r");
+            added++;
+            done = whole ? OnOnePage(doc, table) : Stranded(doc, table, rows) == 0;
+        }
+        if (done) return added;
+        doc.Range(block, block + added).Delete();
+        return 0;
+    }
+
+    /// format_table keepTogether: a table that breaks across two pages is put on one, whatever number of rows the
+    /// break cut off, as long as that does not leave too much of the page before it empty.
+    static string KeepTable(dynamic doc, dynamic table, bool force)
+    {
+        int rows = (int)table.Rows.Count;
+        if (OnOnePage(doc, table)) return ", already on one page";
+        bool nested = false;
+        try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
+        if (!nested)
+        {
+            // Every row but the last stays with the next one: Word then moves the table by itself.
+            for (int r = 1; r < rows; r++) { try { table.Rows[r].Range.ParagraphFormat.KeepWithNext = -1; } catch (COMException) { } }
+            if (OnOnePage(doc, table)) return ", now on one page";
+        }
+        double gap;
+        int added = PushDown(doc, table, rows, true, force ? 1.0 : 0.34, out gap);
+        if (added > 0) return ", now on one page (pushed down by " + added + " empty line(s), which leaves about " + Math.Round(gap * 100) + "% of the page before it empty: if you change the text above it later, take those lines out first)";
+        if (added < 0) return " — NOTE the table was NOT moved: putting it whole on the next page would leave about " + Math.Round(gap * 100) + "% of this page empty. Let it break, or bring a later paragraph up before it; keepTogether: 'force' moves it all the same";
+        return " — NOTE the table could not be put on one page (it is longer than a page, or Word would not move it)";
+    }
+
+    /// A table broken across two pages so that a single row is cut off from the rest (its last row alone at the head
+    /// of the next page, or only its header and one row at the foot of the first) is set right. Where the table stands
+    /// in the document itself, the rows concerned are told to stay together and Word moves them. Inside a cell of
+    /// another table (the frame of a form or a report template) Word does not honour that, and no page break can be
+    /// put in a cell either: there a short table is pushed down whole, with its caption and the heading above it, by
+    /// empty lines, as one would do by hand. A long one is left as it is and named, for the text above to be changed.
+    static string KeepWhole(dynamic doc)
+    {
+        List<object> all = new List<object>();
+        try { EveryTable(doc.Tables, all, 0); } catch (Exception) { return ""; }
+        int mended = 0, lines = 0;
+        List<string> left = new List<string>(), wide = new List<string>();
+        foreach (dynamic table in all)
+        {
+            try
+            {
+                int rows = (int)table.Rows.Count;
+                if (rows < 2) continue;
+                // The table every other one sits in (the frame itself) is not what is meant.
+                bool frame = false;
+                try { frame = (int)table.Tables.Count > 0; } catch (COMException) { }
+                if (frame) continue;
+                int how = Stranded(doc, table, rows);
+                if (how == 0) continue;
+                bool nested = false;
+                try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
+                if (!nested)
+                {
+                    // The header and the rows after it together; the last rows together.
+                    int from = how == 1 ? 1 : Math.Max(1, rows - 2), to = how == 1 ? Math.Min(rows - 1, 3) : rows - 1;
+                    for (int r = from; r <= to; r++) { try { table.Rows[r].Range.ParagraphFormat.KeepWithNext = -1; } catch (COMException) { } }
+                    if (Stranded(doc, table, rows) == 0) { mended++; continue; }
+                }
+                int start = (int)table.Range.Start;
+                // Pushed down whole: only where little of it stood on the first page, or the table is a short one.
+                if (how == 2 && rows > 12)
+                {
+                    int last = (int)doc.Range(0, table.Range.End).Paragraphs.Count;
+                    left.Add((last - (int)table.Range.Paragraphs.Count + 1) + "–" + last);
+                    continue;
+                }
+                double gap;
+                int added = PushDown(doc, table, rows, false, 0.34, out gap);
+                if (added > 0) { mended++; lines += added; }
+                else if (added < 0)
+                {
+                    int last = (int)doc.Range(0, table.Range.End).Paragraphs.Count;
+                    wide.Add((last - (int)table.Range.Paragraphs.Count + 1) + "–" + last);
+                }
+            }
+            catch (COMException error) { Trace("a table with a row cut off by a page break: " + error.Message.Trim()); }
+        }
+        string said = "";
+        if (mended > 0) said = mended + " table(s) that a page break cut a single row off from now have their rows together" + (lines > 0 ? " (pushed down by " + lines + " empty line(s) in all: if you add or remove text above one of them later, take those lines out and run fill_gaps again)" : "");
+        if (left.Count > 0) said += (said.Length > 0 ? "; " : "") + "NOTE the table at paragraphs " + string.Join(", ", left.ToArray()) + " leaves its last row alone at the head of the next page: shorten the text above it by a line or two, or take out an empty line there";
+        if (wide.Count > 0) said += (said.Length > 0 ? "; " : "") + "NOTE the table at paragraphs " + string.Join(", ", wide.ToArray()) + " has a single row cut off by the page break, and moving it whole would leave more than a third of the page empty: change the text above it instead (shorten it, or bring a later paragraph up before the table)";
+        return said;
+    }
+
     static string FillGaps(dynamic doc)
     {
         int moved = 0, blocks = 0, figures = (int)doc.InlineShapes.Count, tables = (int)doc.Tables.Count;
@@ -2897,13 +3095,30 @@ static class Program
             if (op.Has("size")) header.Font.Size = (float)op.Num("size", 9);
             return "page header set";
         }
-        if (type == "fill_gaps") return FillGaps(doc);
+        if (type == "fill_gaps")
+        {
+            // Gaps first: text brought up before a figure changes where the tables after it fall.
+            string gaps = FillGaps(doc), whole = KeepWhole(doc);
+            return whole.Length == 0 ? gaps : gaps.StartsWith("no page", StringComparison.Ordinal) ? whole : gaps + "; " + whole;
+        }
         if (type == "update_fields") { Refresh(doc); return "table of contents and cross-references refreshed"; }
         if (type == "format_table")
         {
             int n = op.Int("table", 1);
-            if (n < 1 || n > (int)doc.Tables.Count) throw new Fail("NOT_FOUND", "There is no table " + n + " (the document has " + (int)doc.Tables.Count + ").");
-            dynamic table = doc.Tables[n];
+            dynamic table;
+            if (op.Has("para") && !op.Has("table"))
+            {
+                // A table inside a cell of another has no number of its own: any paragraph of it names it.
+                dynamic inside = Para(doc, op.Int("para", 1), op.Str("expect", null));
+                if (!Truthy(inside.Range.Information[12])) throw new Fail("NOT_FOUND", "Paragraph " + op.Int("para", 1) + " is not in a table.");
+                table = inside.Range.Tables[1];
+                n = 0;
+            }
+            else
+            {
+                if (n < 1 || n > (int)doc.Tables.Count) throw new Fail("NOT_FOUND", "There is no table " + n + " (the document has " + (int)doc.Tables.Count + ").");
+                table = doc.Tables[n];
+            }
             Follow(doc, table.Range);
             if (op.Has("borders")) Rules(table, op.Need("borders"));
             if (op.Has("font")) { string font = op.Need("font"); table.Range.Font.Name = font; try { table.Range.Font.NameFarEast = font; } catch (COMException) { } }
@@ -2914,13 +3129,9 @@ static class Program
             if (op.Has("rowHeight")) { table.Rows.HeightRule = 1; table.Rows.Height = (float)op.Points("rowHeight", 20); }
             if (op.Has("lineSpacing")) LineSpacing(table.Range.ParagraphFormat, op.Raw("lineSpacing"));
             if (op.Has("autofit")) { string fit = op.Need("autofit"); try { table.AutoFitBehavior(fit == "content" ? 1 : fit == "fixed" ? 0 : 2); } catch (COMException) { } }
-            if (op.Has("keepTogether") && op.On("keepTogether"))
-            {
-                // Every row but the last stays with the next one, so the table is not split across two pages.
-                int rows = (int)table.Rows.Count;
-                for (int r = 1; r < rows; r++) { try { table.Rows[r].Range.ParagraphFormat.KeepWithNext = -1; } catch (COMException) { } }
-            }
-            return "table " + n + " formatted";
+            string kept = "";
+            if (op.Has("keepTogether") && (op.Str("keepTogether", "") == "force" || op.On("keepTogether"))) kept = KeepTable(doc, table, op.Str("keepTogether", "") == "force");
+            return (n > 0 ? "table " + n : "the table at paragraph " + op.Int("para", 1)) + " formatted" + kept;
         }
         if (type == "set_image")
         {

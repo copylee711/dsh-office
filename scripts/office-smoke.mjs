@@ -103,6 +103,10 @@ if (apps.includes('word')) {
   await edit('word', path, [{ op: 'insert_paragraphs', where: 'end', items: [{ text: '极小周期 $T_{min}=1.2002$ s，出现在 $x_{max}$ 处。' }, { text: '$$T_{min}=2\\pi\\sqrt{\\frac{2R_G}{g}} \\tag{1}$$' }, { text: '公式后的一段。' }] }])
   read = await call('read', { doc: path, from: tail + 1, full: true })
   check('word text after a formula is kept', read.paragraphs === tail + 3 && /1\.2002 s，出现在/.test(read.items[0]?.text ?? '') && /处。$/.test(read.items[0]?.text ?? '') && read.items[2]?.text === '公式后的一段。', read.items.map(i => i.text).join(' / '))
+  // Units written with \mathrm come out upright (read back as plain letters, not the italic ones of mathematics).
+  await edit('word', path, [{ op: 'insert_paragraphs', where: 'end', items: [{ text: '$$D=(42.0\\pm0.5)\\ \\mathrm{mm}$$' }, { text: '速度 $v=3\\ \\mathrm{m/s}$，时间 $5\\,\\mathrm{\\mu s}$ 完。' }] }])
+  read = await call('read', { doc: path, from: tail + 4, full: true })
+  check('word units upright', /mm$/.test(read.items[0]?.text ?? '') && /3\sm\/s，/.test(read.items[1]?.text ?? '') && /5\sμs/.test(read.items[1]?.text ?? ''), read.items.map(i => i.text).join(' / '))
   // A table inside a cell of another table: read by its own numbers, and removed as a table by delete_range.
   await edit('word', path, [{ op: 'insert_table', where: 'end', rows: 1, cols: 1 }])
   const frame = (await call('read', { doc: path })).items.findLast(i => i.size === '1x1')
