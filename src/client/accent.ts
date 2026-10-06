@@ -88,7 +88,7 @@ export function useAccent(): [Accent, (accent: Accent) => void] {
 }
 
 /** A row of round swatches: one of them is always chosen. */
-export function AccentPicker({ label = '强调色', hint = '对 copylee 的全部插件生效', names }: {
+export function AccentPicker({ label = '强调色', hint = '', names }: {
   label?: string
   hint?: string
   /** Colour names in the page's language; the built-in ones are Chinese. */
@@ -109,6 +109,6 @@ export function AccentPicker({ label = '强调色', hint = '对 copylee 的全�
           boxShadow: accent === id ? '0 0 0 2px var(--dsw-alias-label-primary, #1F1E1D)' : '0 0 0 1px var(--dsw-alias-border-l2, rgba(127,127,127,.35))',
         },
       }))),
-    h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #888)' } }, `${name(accent)} · ${hint}`),
+    h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #888)' } }, hint ? `${name(accent)} · ${hint}` : name(accent)),
   )
 }
