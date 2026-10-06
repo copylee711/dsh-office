@@ -156,22 +156,21 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('agent/disposed', ({ agent }) => { retire(agent) })
 
   // The host's file-based Office skills tell the model to build the file with a script. The first time one is
-  // loaded in a session, the model gets this plugin's short skill instead, as the ordinary result of the call:
-  // the skill itself still loads (so the result has the shape the host expects), only what the model reads is
-  // replaced. A refusal would do the same job but shows the user a red error at the start of every session.
+  // loaded in a session, the model reads this plugin's short skill instead. The skill itself loads as usual and
+  // succeeds; what is replaced, after it ran, is the text shown to the model — the one thing the host lets a
+  // plugin replace on a finished call (a result changed around the call is rebuilt from the skill's own value,
+  // and a refusal before it shows the user a red error at the start of every session).
   const redirected = new Set<string>()
-  ctx.on('tools/execute', async (exec, next) => {
-    if (exec.name !== 'skill' || !settings().preferLive) return next()
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    if (exec.name !== 'skill' || result.isError || !settings().preferLive) return next()
     const skill = String((exec.arguments as { name?: unknown } | undefined)?.name ?? '')
     const app = FILE_SKILLS[skill]
     if (app === undefined) return next()
     const session = (exec.agent as { session?: { id?: string } } | undefined)?.session?.id ?? 'default'
     const key = `${session}:${skill}`
     if (redirected.has(key) || !(await installedApps()).has(app)) return next()
-    const loaded = await next()
-    if (loaded.isError) return loaded
     redirected.add(key)
-    return { ...loaded, content: [{ type: 'text', text: redirectText(skill, app) }] }
+    return { kind: 'accept', content: [{ type: 'text', text: redirectText(skill, app) }] }
   })
 
   // Settings page bridge (which apps are installed and what is open); optional so headless hosts still load.
