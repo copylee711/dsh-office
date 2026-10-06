@@ -1258,6 +1258,9 @@ static class Program
     static void Follow(dynamic doc, dynamic range)
     {
         if (!Following) return;
+        // WPS brings its window back to the caret after every change: the view would jump between the edit and
+        // wherever the caret was left. While the user has it follow, the caret goes along to the end of the edit.
+        if (Suite == "wps") { try { int end = (int)range.End; doc.Range(end, end).Select(); } catch (Exception) { } }
         try { doc.Windows[1].ScrollIntoView(range, true); } catch (Exception) { }
     }
 
@@ -1728,6 +1731,32 @@ static class Program
         {
             try { dynamic format = doc.Range(at, at).Paragraphs[1].Format; format.Alignment = 1; format.CharacterUnitFirstLineIndent = 0; format.FirstLineIndent = 0; if ((float)format.SpaceBefore < 6f) format.SpaceBefore = 6f; if ((float)format.SpaceAfter < 6f) format.SpaceAfter = 6f; }
             catch (Exception) { }
+        }
+        // A numbered equation as wide as the line pushes against its number, or past the margin. It is set a
+        // little smaller, step by step, until some room is left between the two.
+        if (display && !string.IsNullOrEmpty(tag))
+        {
+            try
+            {
+                dynamic math = doc.Range(at, at).Paragraphs[1].Range.OMaths[1].Range;
+                int number = tag.Length + 2;
+                float size = (float)math.Font.Size, least = size * 0.7f;
+                for (int attempt = 0; attempt < 8 && size > 4; attempt++)
+                {
+                    int end = (int)math.End, begin = (int)math.Start;
+                    // Where the number begins and where the equation proper ends (the place before the "#").
+                    double numberAt = Convert.ToDouble(doc.Range(end - number, end - number).Information[5]);
+                    double lastAt = Convert.ToDouble(doc.Range(end - number - 2, end - number - 2).Information[5]) + size * 0.7;
+                    bool oneLine = Math.Abs(Convert.ToDouble(doc.Range(end, end).Information[6]) - Convert.ToDouble(doc.Range(begin, begin).Information[6])) < 2;
+                    Trace("numbered equation: ends at " + Math.Round(lastAt) + ", number at " + Math.Round(numberAt) + ", size " + size + (oneLine ? "" : ", on two lines"));
+                    if (oneLine && numberAt - lastAt >= 14) break;
+                    if (size - 0.5f < least) break;
+                    size -= 0.5f;
+                    math.Font.Size = size;
+                    math = doc.Range(at, at).Paragraphs[1].Range.OMaths[1].Range;
+                }
+            }
+            catch (Exception error) { Trace("numbered equation, fitting: " + error.Message.Trim()); }
         }
         Cramped = true;
         return true;
@@ -5499,6 +5528,20 @@ static class Program
                 if (baseline > 0) picture.Top = (float)(y + TextBaseline * h - baseline);
                 else picture.Top = (float)(y + (h - height) / 2 + Lower * size);
                 try { picture.Name = "Formula of " + (string)shape.Name + " " + (ordinal + 1); } catch (Exception) { }
+                // The text it stands in may come in by an animation: the picture comes in with it, not before.
+                try
+                {
+                    dynamic sequence = slide.TimeLine.MainSequence;
+                    int count = (int)sequence.Count, owner = 0, own = (int)shape.Id;
+                    for (int i = 1; i <= count; i++) { if ((int)sequence[i].Shape.Id == own) owner = i; }
+                    if (owner > 0)
+                    {
+                        dynamic effect = sequence.AddEffect(picture, 10, 0, 2);
+                        try { effect.Timing.Duration = 0.35f; } catch (Exception) { }
+                        if (owner < count) { try { effect.MoveTo(owner + 1); } catch (Exception error) { Trace("formula picture, its place in the animation: " + error.Message.Trim()); } }
+                    }
+                }
+                catch (Exception error) { Trace("formula picture, animation: " + error.Message.Trim()); }
             }
             catch (Exception error) { SlideMathSkipped++; Trace("placing a formula picture: " + error.GetType().Name + " " + error.Message); }
             finally { try { File.Delete(file); } catch (Exception) { } }
@@ -7097,32 +7140,82 @@ static class Program
             Callout(p, op, x, y + h - 46, w);
             return;
         }
+        // A point that runs over its line would write into the next one: when any does, each row is as tall as its
+        // words need, and the type gives way a little if the column is short.
+        double[] tops = null, highs = null;
+        double shrink = 1, drift = 0;
+        if (!columns && !numbered)
+        {
+            double room = h - (foot ? 54 : 0), across = Math.Max(40, colWidth - 22);
+            foreach (double factor in new double[] { 1, 0.93, 0.87, 0.8, 0.74 })
+            {
+                double sum = 0;
+                bool over = false;
+                double[] each = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    string words = Field(points[i], "text") ?? "";
+                    double size = (heads ? 13.5 : 15.5) * factor, lines = Math.Max(1, Math.Ceiling(Wide(words) * size * 1.1 / across));
+                    each[i] = heads ? 32 * factor + lines * size * 1.42 + 14 : lines * size * 1.42 + 18;
+                    if (each[i] > row + 0.5) over = true;
+                    sum += each[i];
+                }
+                if (!over) break;
+                shrink = factor;
+                highs = each;
+                tops = new double[n];
+                double at = sum < room ? Settle(y, room, sum) : y;
+                for (int i = 0; i < n; i++) { tops[i] = at; at += each[i]; }
+                if (sum <= room) break;
+            }
+        }
         for (int i = 0; i < n; i++)
         {
             Unit(p);
 
             object raw = points[i];
             string head = Field(raw, "head"), text = Field(raw, "text") ?? "";
-            double cx = x + (columns && i >= perColumn ? colWidth + 32 : 0), cy = start + (columns ? i % perColumn : i) * row;
+            double cx = x + (columns && i >= perColumn ? colWidth + 32 : 0), cy = (tops != null ? tops[i] : start + (columns ? i % perColumn : i) * row) + drift;
             double inset = numbered ? 52 : 22;
+            double rowWas = row;
+            if (highs != null) row = highs[i];
             dynamic mark;
             if (numbered) mark = Label(p, cx, cy, 44, row - 10, (i + 1).ToString("00"), 26, Pick(p, i), true, t.TitleFont, 1, 3, null);
             else mark = Block(p, cx, cy + (head != null ? 10 : 9), 8, 8, Pick(p, i), false);
             dynamic body;
             if (head != null)
             {
-                dynamic title = Words(p, cx + inset, cy, colWidth - inset, 28, head, 16.5, t.Text, true);
-                body = Words(p, cx + inset, cy + 32, colWidth - inset, row - 38, text, 13.5, t.Muted, false);
+                dynamic title = Words(p, cx + inset, cy, colWidth - inset, 28 * shrink, head, 16.5 * shrink, t.Text, true);
+                body = Words(p, cx + inset, cy + 32 * shrink, colWidth - inset, row - 38 * shrink, text, 13.5 * shrink, t.Muted, false);
                 p.Motion.Add(title);
             }
             else
             {
-                body = Label(p, cx + inset, cy, colWidth - inset, row - 10, text, numbered ? 16.5 : 15.5, t.Text, false, t.BodyFont, 1, numbered ? 3 : 1, t.Accent);
+                body = Label(p, cx + inset, cy, colWidth - inset, row - 10, text, (numbered ? 16.5 : 15.5) * shrink, t.Text, false, t.BodyFont, 1, numbered ? 3 : 1, t.Accent);
                 p.Motion.Add(body);
             }
+            // What the words really take, once set: a row that proved too low grows, and the rows after it move down.
+            if (!columns && !numbered)
+            {
+                try
+                {
+                    double taken = Convert.ToDouble(body.TextFrame.TextRange.BoundHeight) / p.Sy + (head != null ? 32 * shrink : 0) + 14;
+                    if (taken > row + 1) { drift += taken - row; row = taken; }
+                }
+                catch (Exception) { }
+            }
             if (i < n - 1 && !columns) Rule(p, cx + inset, cy + row - 6, cx + colWidth, cy + row - 6, t.Line, 0.5);
+            row = rowWas;
         }
         Callout(p, op, x, y + h - 46, w);
+    }
+
+    /// How wide a text runs, counted in full-width characters: a Latin letter or digit is about half of one.
+    static double Wide(string text)
+    {
+        double sum = 0;
+        foreach (char ch in text) sum += ch >= 0x2E80 ? 1 : ch == ' ' ? 0.36 : 0.62;
+        return sum;
     }
 
     /// A remark set apart at the foot of the body, when the slide has one.
@@ -7598,6 +7691,21 @@ static class Program
         Theme t = p.T;
         IList items = Items(op, "items", "elements");
         if (items.Count == 0) throw new Fail("BAD_ARGS", "A canvas slide needs \"items\": [{type, box: [x, y, w, h], ..}, ..] on the 960 x 540 canvas.");
+        IList beside = op.List("edges");
+        if (beside != null && beside.Count > 0)
+        {
+            List<object> all = new List<object>();
+            foreach (object one in items) all.Add(one);
+            foreach (object one in beside)
+            {
+                Dictionary<string, object> edge = one as Dictionary<string, object>;
+                if (edge == null) continue;
+                edge = new Dictionary<string, object>(edge);
+                edge["type"] = "edge";
+                all.Add(edge);
+            }
+            items = all;
+        }
         int index = 0;
         Dictionary<string, object> known = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         foreach (object raw in items)
@@ -7624,7 +7732,28 @@ static class Program
                 bool apart = bx >= ax + aw || ax >= bx + bw, stacked = by >= ay + ah || ay >= by + bh;
                 bool across = apart && !stacked ? true : stacked && !apart ? false : Math.Abs(dx) >= Math.Abs(dy);
                 string leave, arrive;
-                if (bent) { leave = across ? "top" : "right"; arrive = leave; }
+                bool blocked = false;
+                if (bent)
+                {
+                    // Does another box stand on the straight way from one to the other?
+                    double x1 = ax + aw / 2, y1 = ay + ah / 2;
+                    foreach (object other in known.Values)
+                    {
+                        if (ReferenceEquals(other, a) || ReferenceEquals(other, b2)) continue;
+                        try
+                        {
+                            dynamic so = (dynamic)other;
+                            double ox = (double)so.Left, oy = (double)so.Top, ow = (double)so.Width, oh = (double)so.Height;
+                            for (int step = 1; step < 20 && !blocked; step++)
+                            {
+                                double px = x1 + dx * step / 20, py = y1 + dy * step / 20;
+                                if (px > ox && px < ox + ow && py > oy && py < oy + oh) blocked = true;
+                            }
+                        }
+                        catch (Exception) { }
+                    }
+                }
+                if (bent && blocked) { leave = across ? "top" : "right"; arrive = leave; }
                 else if (across) { leave = dx >= 0 ? "right" : "left"; arrive = dx >= 0 ? "left" : "right"; }
                 else { leave = dy >= 0 ? "bottom" : "top"; arrive = dy >= 0 ? "top" : "bottom"; }
                 leave = it.Str("fromSide", leave).ToLowerInvariant();
@@ -7644,8 +7773,15 @@ static class Program
                     try { double turn = Math.Abs((double)link.Rotation) % 180; if (turn > 45 && turn < 135) { double swap = lw; lw = lh; lh = swap; } } catch (Exception) { }
                     double mx = (lcx - p.Ox) / p.Sx, my = (lcy - p.Oy) / p.Sy;
                     // The words stand over the line; over an arch they stand on its crown.
-                    if (bent && leave == "top" && arrive == "top") my = (lcy - lh / 2 - p.Oy) / p.Sy - 3;
-                    Label(p, mx - 90, my - 20, 180, 16, it.Need("label"), 10.5, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 4, null);
+                    bool arch = bent && leave == "top" && arrive == "top";
+                    if (arch) my = (lcy - lh / 2 - p.Oy) / p.Sy - 3;
+                    string said = it.Need("label");
+                    // The words stand on the line itself, on a patch of the page colour as wide as they are, so the
+                    // line does not run through them.
+                    double wordsWide = said.IndexOf('$') >= 0 ? 44 : Math.Min(220, Wide(said) * 10.5 + 12);
+                    dynamic tag = arch ? Label(p, mx - wordsWide / 2, my - 20, wordsWide, 16, said, 10.5, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 4, null)
+                        : Label(p, mx - wordsWide / 2, my - 9, wordsWide, 18, said, 10.5, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 3, null);
+                    if (!arch && !p.Based) { try { tag.Fill.Visible = -1; tag.Fill.Solid(); tag.Fill.ForeColor.RGB = Bgr(t.Bg); } catch (Exception) { } }
                 }
                 continue;
             }
