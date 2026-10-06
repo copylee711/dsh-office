@@ -1020,3 +1020,11 @@
 - 表格默认不在 Excel 窗口里做：`office-xlsx` 技能不再被引回本插件；系统提示改为“数据分析和读写 .xlsx / .csv 用代码，用户指明要在 Excel / WPS 表格里做、或工作簿已在其中打开时才用 office_ 工具”。Word、PowerPoint 的行为不变。
 - 验证：类型检查、单元测试、构建通过。
 - 没有验证的：没有用真实模型跑数据分析任务确认它改走代码；Excel 的 office_ 工具本身没有改动，未重跑冒烟。
+
+## 1.1.0
+
+- 去掉 1.0.9 里“工作簿已在 Excel 里打开时用 office_ 工具”的例外：文件被占用时把结果写到副本，原始数据也因此不动。
+- 真实模型（opencode go 的 deepseek-v4.1-flash，隔离宿主，完全权限）各跑一次：
+  - “分析 sales.xlsx 里的销售数据……”（不提 Excel）：18 次工具调用全是 pwsh / write / read / edit / present，用 pandas 算出结果，没有调用任何 office_ 工具，用时 1 分 46 秒。
+  - “用 Excel 做一张水果销售表……”：走 office_open / office_edit / office_render / office_save，文件保存成功，用时 39 秒。
+- 没有验证的：每个任务只跑了一次；数据分析那次模型没有去加载 office-xlsx 技能（直接写了代码），所以“技能照常加载、不被引回”这条只有代码层面的保证；没有测工作簿正开着时的分析。
