@@ -143,6 +143,7 @@ describe('office tools', () => {
     const sheets = await run('office_help', { app: 'excel' })
     expect(sheets.text).toContain('pivot {')
     expect((await run('office_help', { app: 'word' })).text).toContain('insert_diagram {')
+    expect((await run('office_help', { app: 'ppt' })).text).toContain('grid {title, rows')
     expect(sheets.text).toContain('clean {')
   })
 

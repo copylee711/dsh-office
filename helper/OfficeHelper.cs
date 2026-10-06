@@ -1689,7 +1689,13 @@ static class Program
         }
         catch (Exception) { }
         string omml = (string)made;
-        if (display && !string.IsNullOrEmpty(tag)) omml = omml.Replace("</m:oMath>", "<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space=\"preserve\">\u2003\u2003(" + System.Security.SecurityElement.Escape(tag) + ")</m:t></m:r></m:oMath>");
+        // The number of an equation stands flush right, the equation itself in the middle: the form Word writes for
+        // "equation#(1)", an array of one line whose "#" sends what follows to the margin.
+        if (display && !string.IsNullOrEmpty(tag) && omml.StartsWith("<m:oMath>", StringComparison.Ordinal) && omml.EndsWith("</m:oMath>", StringComparison.Ordinal))
+        {
+            string inner = omml.Substring(9, omml.Length - 19);
+            omml = "<m:oMath><m:eqArr><m:eqArrPr><m:maxDist m:val=\"1\"/></m:eqArrPr><m:e>" + inner + "<m:r><m:t>#</m:t></m:r><m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\"/></w:rPr><m:t>(" + System.Security.SecurityElement.Escape(tag) + ")</m:t></m:r></m:e></m:eqArr></m:oMath>";
+        }
         spot.InsertXML(FlatDocument(display ? "<m:oMathPara><m:oMathParaPr><m:jc m:val=\"center\"/></m:oMathParaPr>" + omml + "</m:oMathPara>" : omml));
         if ((int)doc.OMaths.Count <= maths) return false;
         // The piece comes in as a paragraph: the mark it brought is taken out again, so the line stays one line.
@@ -2611,6 +2617,13 @@ static class Program
             int rows = op.Int("rows", data == null ? 2 : data.Count), cols = op.Int("cols", 0);
             if (data != null) foreach (object row in data) { IList cells = row as IList; if (cells != null) cols = Math.Max(cols, cells.Count); }
             if (rows < 1 || cols < 1) throw new Fail("BAD_ARGS", "Give \"data\" (rows of cells) or \"rows\" and \"cols\".");
+            if (op.Has("para") && !op.Has("expect") && !op.Flag("nested", false) && !Nested)
+            {
+                bool inside = false;
+                int wanted = op.Int("para", 0);
+                try { if (wanted >= 1 && wanted <= (int)doc.Paragraphs.Count) inside = (bool)doc.Paragraphs[wanted].Range.Information[12]; } catch (Exception) { }
+                if (inside) throw new Fail("STALE", "Paragraph " + wanted + " lies inside a table, so this table would be put into one of its cells. If a table was inserted earlier in this call, the numbers you read before no longer hold after it: every cell of a table is a paragraph. Read the document again and use the new numbers (or, in one call, insert from the END of the document towards the start, which leaves the earlier numbers valid). To put a table into a cell on purpose, pass nested: true.");
+            }
             dynamic p = NewParagraph(doc, op);
             string fontName = null, fontFarEast = null;
             float fontSize = 0;
@@ -5937,6 +5950,10 @@ static class Program
         public string Texture = "";
         /// How the section slides of the deck look: solid, side, band or number.
         public string Section = "";
+        /// The small parts every layout is built from: the corners of cards and panels (soft, square, round, pill),
+        /// the ground of a card (soft = a tinted fill, outline = a thin frame, shadow = white with a soft shadow)
+        /// and the mark before a point (square, dot, dash).
+        public string Corners = "soft", Cards = "soft", Marks = "square";
         /// A slide of the deck every designed slide is drawn on (a template's background page), 0 = a blank slide.
         public int Base;
         /// The part of the slide the content may use: left, top, width, height in points (empty = all of it).
@@ -5950,6 +5967,7 @@ static class Program
         switch (name)
         {
             case "ink": break;
+            case "academic": case "scholar": t.Name = "academic"; t.Bg = "#FFFFFF"; t.Surface = "#F2F4F7"; t.Text = "#1B1F24"; t.Muted = "#667085"; t.Primary = "#1B3A6B"; t.Accent = "#A63D2F"; t.Line = "#D5D9E0"; break;
             case "paper": t.Bg = "#FCFBF8"; t.Surface = "#EEF1F5"; t.Text = "#1F2937"; t.Muted = "#6B7280"; t.Primary = "#1F4E79"; t.Accent = "#C2452D"; t.Line = "#D6DAE0"; t.TitleFont = "Noto Serif SC"; break;
             case "night": t.Bg = "#0E0E10"; t.Surface = "#1B1B1F"; t.Text = "#F2EDE4"; t.Muted = "#9A948A"; t.Primary = "#E7C873"; t.Accent = "#C8553D"; t.Line = "#35322E"; t.TitleFont = "Noto Serif SC"; t.Dark = true; break;
             case "chalk": t.Bg = "#1F3A32"; t.Surface = "#274A40"; t.Text = "#F3EFE0"; t.Muted = "#A9BDB3"; t.Primary = "#F2D16B"; t.Accent = "#F2A7A0"; t.Line = "#56776A"; t.TitleFont = "楷体"; t.Dark = true; break;
@@ -5960,7 +5978,7 @@ static class Program
             case "crimson": t.Bg = "#FFFDF8"; t.Surface = "#F7EDE4"; t.Text = "#2B1D1A"; t.Muted = "#8A7268"; t.Primary = "#B01E23"; t.Accent = "#C89B3C"; t.Line = "#EAD9CC"; t.Texture = "gradient"; break;
             case "slate": t.Bg = "#F4F6F8"; t.Surface = "#E6EAEE"; t.Text = "#1F2A37"; t.Muted = "#66727F"; t.Primary = "#2F4A63"; t.Accent = "#0FA3B1"; t.Line = "#D3DAE1"; t.Texture = "grid"; break;
             case "plum": t.Bg = "#17131F"; t.Surface = "#231D30"; t.Text = "#F1ECF8"; t.Muted = "#A79FB8"; t.Primary = "#C9A7FF"; t.Accent = "#FF8FA3"; t.Line = "#3A3150"; t.Dark = true; break;
-            default: throw new Fail("BAD_ARGS", "Unknown theme \"" + name + "\": use ink, paper, ocean, forest, graphite, sepia, crimson, slate (light) or night, chalk, plum (dark), and override single colours if you like.");
+            default: throw new Fail("BAD_ARGS", "Unknown theme \"" + name + "\": use ink, academic, paper, ocean, forest, graphite, sepia, crimson, slate (light) or night, chalk, plum (dark), and override single colours if you like.");
         }
         return t;
     }
@@ -6000,6 +6018,15 @@ static class Program
             else if (File.Exists(ground)) t.Texture = "image:" + Path.GetFullPath(ground);
             else throw new Fail("BAD_ARGS", "\"background\" is plain, paper, gradient, grid or dots, or the path of a picture to lay faintly behind every slide; \"" + ground + "\" is neither.");
         }
+        if (op.Has("corners")) t.Corners = op.Need("corners").ToLowerInvariant();
+        if (op.Has("cards")) t.Cards = op.Need("cards").ToLowerInvariant();
+        if (op.Has("marks")) t.Marks = op.Need("marks").ToLowerInvariant();
+        if (t.Corners == null) t.Corners = "soft";
+        if (t.Cards == null) t.Cards = "soft";
+        if (t.Marks == null) t.Marks = "square";
+        if (t.Corners != "soft" && t.Corners != "square" && t.Corners != "round" && t.Corners != "pill") throw new Fail("BAD_ARGS", "\"corners\" is soft, square, round or pill.");
+        if (t.Cards != "soft" && t.Cards != "outline" && t.Cards != "shadow") throw new Fail("BAD_ARGS", "\"cards\" is soft (a tinted ground), outline (a thin frame) or shadow (white with a soft shadow).");
+        if (t.Marks != "square" && t.Marks != "dot" && t.Marks != "dash") throw new Fail("BAD_ARGS", "\"marks\" is square, dot or dash.");
         if (op.Has("section")) t.Section = op.Need("section").ToLowerInvariant();
         // Decks should not all open their parts the same way: unless told, one of the looks is taken by chance.
         if (string.IsNullOrEmpty(t.Section)) t.Section = new string[] { "solid", "side", "band", "number" }[new Random().Next(4)];
@@ -6151,9 +6178,48 @@ static class Program
     static float SX(Page p, double v) { return (float)(v * p.Sx); }
     static float SY(Page p, double v) { return (float)(v * p.Sy); }
 
+    /// The roundness of a rounded box, set so that it holds in WPS too, where the short form does not always reach.
+    static void Round(dynamic shape, double share)
+    {
+        float value = (float)Math.Max(0, Math.Min(0.5, share));
+        try { shape.Adjustments[1] = value; } catch (Exception) { }
+        try { if (Math.Abs((float)shape.Adjustments[1] - value) > 0.005f) shape.Adjustments.Item[1] = value; } catch (Exception) { }
+        try { if (Math.Abs((float)shape.Adjustments[1] - value) > 0.005f) shape.Adjustments.set_Item(1, value); } catch (Exception) { }
+    }
+
+    /// A box that connectors will join keeps the application's own shape, whose sides have their sites.
+    static bool NativeBox;
+
     static dynamic Block(Page p, double x, double y, double w, double h, string fill, bool rounded)
     {
-        dynamic shape = p.Slide.Shapes.AddShape(rounded ? 5 : 1, PX(p, x), PY(p, y), Math.Max(0.5f, SX(p, w)), Math.Max(0.5f, SY(p, h)));
+        string corners = p.T.Corners ?? "soft", cards = p.T.Cards ?? "soft", marks = p.T.Marks ?? "square";
+        // The small square before a point is the deck's mark: a square, a dot or a dash.
+        bool mark = !rounded && fill != null && w == h && w <= 8;
+        if (mark && marks == "dash") { y += h / 2 - 1; h = 2; w = w * 1.8; }
+        dynamic shape = null;
+        // WPS does not let the roundness of a rounded box be set: it stays a sixth of the short side, which on a
+        // card is a bubble. There the outline is drawn: straight sides, each corner a short run of small steps.
+        if (Suite == "wps" && rounded && !NativeBox && (corners == "soft" || corners == "round") && Math.Min(w, h) > 60)
+        {
+            try
+            {
+                float left = PX(p, x), top = PY(p, y), wide = SX(p, w), high = SY(p, h), r = (float)((corners == "round" ? 18 : 8) * p.S);
+                float[] cx = { left + wide - r, left + wide - r, left + r, left + r }, cy = { top + r, top + high - r, top + high - r, top + r };
+                dynamic builder = p.Slide.Shapes.BuildFreeform(0, left + r, top);
+                for (int corner = 0; corner < 4; corner++)
+                {
+                    for (int step = 0; step <= 6; step++)
+                    {
+                        double angle = (-90 + corner * 90 + step * 15) * Math.PI / 180;
+                        builder.AddNodes(0, 0, cx[corner] + (float)(r * Math.Cos(angle)), cy[corner] + (float)(r * Math.Sin(angle)));
+                    }
+                }
+                builder.AddNodes(0, 0, left + r, top);
+                shape = builder.ConvertToShape();
+            }
+            catch (Exception error) { Trace("drawn card: " + error.Message.Trim()); shape = null; }
+        }
+        if (shape == null) shape = p.Slide.Shapes.AddShape(mark && marks == "dot" ? 9 : rounded && corners != "square" ? 5 : 1, PX(p, x), PY(p, y), Math.Max(0.5f, SX(p, w)), Math.Max(0.5f, SY(p, h)));
         shape.Line.Visible = 0;
         if (fill == null) shape.Fill.Visible = 0;
         else
@@ -6162,8 +6228,29 @@ static class Program
             // On a template's picture the grounds of cards and bands are white and let a little of it through.
             if (p.Based && fill == p.T.Surface && w > 60 && h > 30) { shape.Fill.ForeColor.RGB = Bgr(p.T.Dark ? "#000000" : "#FFFFFF"); try { shape.Fill.Transparency = p.T.Dark ? 0.45f : 0.14f; } catch (Exception) { } }
         }
-        if (rounded) { try { shape.Adjustments[1] = (float)Math.Min(0.5, 8.0 / Math.Max(1, Math.Min(w, h))); } catch (Exception) { } }
+        if (rounded && corners != "square") Round(shape, corners == "pill" ? 0.5 : (corners == "round" ? 18.0 : 8.0) / Math.Max(1, Math.Min(w, h)));
         try { shape.Shadow.Visible = 0; } catch (Exception) { }
+        // The ground of a card, as the deck has it.
+        if (rounded && fill != null && fill == p.T.Surface && w > 60 && h > 30 && !p.Based)
+        {
+            if (cards == "outline")
+            {
+                shape.Fill.ForeColor.RGB = Bgr(p.T.Bg);
+                shape.Line.Visible = -1; shape.Line.ForeColor.RGB = Bgr(p.T.Line); shape.Line.Weight = (float)(1 * p.S);
+            }
+            else if (cards == "shadow")
+            {
+                shape.Fill.ForeColor.RGB = Bgr(p.T.Dark ? p.T.Surface : "#FFFFFF");
+                try
+                {
+                    dynamic shade = shape.Shadow;
+                    shade.Visible = -1; shade.ForeColor.RGB = 0; shade.Transparency = p.T.Dark ? 0.55f : 0.86f;
+                    shade.OffsetX = 0f; shade.OffsetY = (float)(3 * p.S);
+                    try { shade.Blur = (float)(14 * p.S); } catch (Exception) { }
+                }
+                catch (Exception) { }
+            }
+        }
         return Track(p, shape);
     }
 
@@ -6600,10 +6687,23 @@ static class Program
     static double Settle(double y, double h, double used)
     {
         double spare = h - used;
-        return spare > 36 ? y + Math.Min(spare / 3, 70) : y;
+        return spare > 24 ? y + spare * 0.42 : y;
     }
 
     static string DesignSlide(dynamic deck, Bag op)
+    {
+        int before = (int)deck.Slides.Count;
+        try { return DesignedSlide(deck, op); }
+        catch (Exception)
+        {
+            // What was drawn before the mistake showed is not left behind as a half-made slide.
+            try { int at = op.Int("at", before + 1); if ((int)deck.Slides.Count > before && at >= 1 && at <= (int)deck.Slides.Count) deck.Slides[at].Delete(); }
+            catch (Exception) { }
+            throw;
+        }
+    }
+
+    static string DesignedSlide(dynamic deck, Bag op)
     {
         string kind = op.Str("kind", "bullets").ToLowerInvariant();
         int total = (int)deck.Slides.Count, index = op.Int("at", total + 1);
@@ -6843,7 +6943,7 @@ static class Program
             double top = Head(p, op), bottom = BodyBottom, left = 48, width = 864;
             p.Current = null;
             // A picture beside the content: the right third of the body.
-            if (image != null && kind != "chart" && kind != "canvas" && kind != "custom" && kind != "diagram" && kind != "code" && kind != "gallery" && kind != "figures")
+            if (image != null && kind != "chart" && kind != "grid" && kind != "compose" && kind != "free" && kind != "canvas" && kind != "custom" && kind != "diagram" && kind != "code" && kind != "gallery" && kind != "figures")
             {
                 Unit(p);
                 bool figure = IsFigure(image), list = kind == "bullets" || kind == "agenda";
@@ -6887,8 +6987,9 @@ static class Program
             else if (kind == "gallery" || kind == "figures") Gallery(p, op, left, top, width, bottom - top);
             else if (kind == "summary" || kind == "takeaways") Summary(p, op, left, top, width, bottom - top);
             else if (kind == "canvas" || kind == "custom" || kind == "diagram") Canvas(p, op);
+            else if (kind == "grid" || kind == "compose" || kind == "free") Grid(p, op, left, top, width, bottom - top);
             else if (kind == "code") Code(p, op, left, top, width, bottom - top);
-            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, theorem, gallery, summary, code, timeline, compare, process, split, image, quote, canvas or closing.");
+            else throw new Fail("BAD_ARGS", "Unknown slide kind \"" + kind + "\": use cover, section, agenda, bullets, cards, stats, chart, table, formula, theorem, gallery, summary, code, timeline, compare, process, split, image, quote, grid, canvas or closing.");
         }
         if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
         Move(p);
@@ -6967,7 +7068,7 @@ static class Program
         bool foot = !string.IsNullOrEmpty(op.Str("callout", null));
         double row = Math.Min(heads ? 108 : 78, (h - (foot ? 54 : 0)) / perColumn), colWidth = columns ? (w - 32) / 2 : w;
         double start = Settle(y, h - (foot ? 54 : 0), row * perColumn);
-        if (!numbered && n <= 5 && (h - (foot ? 54 : 0)) / n < (heads ? 66 : 40))
+        if (!numbered && n <= 5 && (h - (foot ? 54 : 0)) / n < (heads ? 56 : 36))
         {
             // Too low for a column of points (a wide picture stands above): they go side by side.
             double gap = 22, cw = (w - gap * (n - 1)) / n, tall = h - (foot ? 54 : 0);
@@ -7047,6 +7148,7 @@ static class Program
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
         double usable = h - (callout ? 54 : 0), gap = 18;
         double cw = (w - gap * (perRow - 1)) / perRow, ch = Math.Min(rows == 1 ? (perRow >= 4 ? 250 : 230) : 160, (usable - gap * (rows - 1)) / rows);
+        double foot = y + h - 42;
         y = Settle(y, usable, rows * ch + gap * (rows - 1));
         for (int i = 0; i < n; i++)
         {
@@ -7066,7 +7168,7 @@ static class Program
             Words(p, cx + 20, ty + (rows == 1 ? 38 : 30), cw - 40, cy + ch - ty - 46, Field(raw, "text") ?? "", rows == 1 ? 13.5 : 12.5, t.Muted, false);
             p.Motion.Add(back);
         }
-        Callout(p, op, x, y + h - 42, w);
+        Callout(p, op, x, foot, w);
     }
 
     static void Stats(Page p, Bag op, double x, double y, double w, double h)
@@ -7077,7 +7179,8 @@ static class Program
         int perRow = n <= 4 ? n : 3, rows = (n + perRow - 1) / perRow;
         IList points = Items(op, "points");
         double usable = h - (points.Count > 0 ? 34 * Math.Min(points.Count, 3) + 12 : 0) - (string.IsNullOrEmpty(op.Str("callout", null)) ? 0 : 54);
-        double gap = 28, cw = (w - gap * (perRow - 1)) / perRow, ch = Math.Min(rows == 1 ? 190 : 150, usable / rows);
+        double below = points.Count > 0 ? 38 * Math.Min(points.Count, 3) + 14 : 0, foot = y + h - 42;
+        double gap = 28, cw = (w - gap * (perRow - 1)) / perRow, ch = Math.Min(rows == 1 ? (points.Count > 0 ? 140 : 190) : 150, usable / rows);
         if (rows == 1 && points.Count == 0)
         {
             // Nothing else on the slide: each figure on a card of its own, tall, with the number as the main thing.
@@ -7109,7 +7212,7 @@ static class Program
             Callout(p, op, x, y + h - 42, w);
             return;
         }
-        y = Settle(y, usable, rows * ch);
+        y = Settle(y, usable + below, rows * ch + below);
         for (int i = 0; i < n; i++)
         {
             Unit(p);
@@ -7141,7 +7244,7 @@ static class Program
             p.Motion.Add(Words(p, x + 18, py, w - 18, 30, Field(points[i], "text") ?? "", 14.5, t.Text, false));
             py += 38;
         }
-        Callout(p, op, x, y + h - 42, w);
+        Callout(p, op, x, foot, w);
     }
 
     /// How high a formula stands, in lines of its own type size.
@@ -7247,7 +7350,15 @@ static class Program
         Theme t = p.T;
         IList steps = Items(op, "steps", "items", "points");
         int n = Math.Max(1, Math.Min(steps.Count, 5));
-        double gap = 26, cw = (w - gap * (n - 1)) / n, ch = Math.Min(300, h - (string.IsNullOrEmpty(op.Str("callout", null)) ? 10 : 60));
+        double gap = 26, cw = (w - gap * (n - 1)) / n, room = h - (string.IsNullOrEmpty(op.Str("callout", null)) ? 10 : 60), ch = 190, foot = y + h - 42;
+        for (int i = 0; i < n; i++)
+        {
+            string words = Field(steps[i], "text") ?? "";
+            double perLine = Math.Max(4, Math.Floor((cw - 28) / 13.5));
+            ch = Math.Max(ch, 126 + Math.Ceiling(words.Length / perLine) * 21 + 18);
+        }
+        ch = Math.Min(Math.Min(300, room), ch);
+        y = Settle(y, room, ch);
         for (int i = 0; i < n; i++)
         {
             Unit(p);
@@ -7268,15 +7379,25 @@ static class Program
             }
             p.Motion.Add(back);
         }
-        Callout(p, op, x, y + h - 42, w);
+        Callout(p, op, x, foot, w);
     }
 
     static void Compare(Page p, Bag op, double x, double y, double w, double h)
     {
         Theme t = p.T;
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
-        double gap = 24, cw = (w - gap) / 2, ch = h - (callout ? 54 : 4);
+        double gap = 24, cw = (w - gap) / 2, ch = h - (callout ? 54 : 4), foot = y + h - 42;
         string[] sides = { "left", "right" };
+        int most = 1;
+        foreach (string name in sides)
+        {
+            Dictionary<string, object> one = op.Raw(name) as Dictionary<string, object>;
+            object listed;
+            if (one != null && one.TryGetValue("points", out listed) && listed is IList) most = Math.Max(most, ((IList)listed).Count);
+        }
+        double fitted = Math.Min(ch, 56 + most * Math.Min(64, (ch - 66) / most) + 12);
+        y = Settle(y, ch, fitted);
+        ch = fitted;
         for (int s = 0; s < 2; s++)
         {
             Dictionary<string, object> side = op.Raw(sides[s]) as Dictionary<string, object>;
@@ -7303,7 +7424,7 @@ static class Program
             }
             p.Motion.Add(back);
         }
-        Callout(p, op, x, y + h - 42, w);
+        Callout(p, op, x, foot, w);
     }
 
     // ───────────────────────── more layouts ─────────────────────────
@@ -7491,14 +7612,25 @@ static class Program
                 string from = it.Need("from"), to = it.Need("to");
                 if (!known.TryGetValue(from, out a) || !known.TryGetValue(to, out b2)) throw new Fail("BAD_ARGS", "Item " + index + " connects \"" + from + "\" to \"" + to + "\", but " + (known.ContainsKey(from) ? "\"" + to + "\"" : "\"" + from + "\"") + " is not the id of an item before it. Ids so far: " + string.Join(", ", new List<string>(known.Keys).ToArray()) + ".");
                 string way = it.Str("kind", it.Str("shape", "elbow")).ToLowerInvariant();
-                dynamic link = p.Slide.Shapes.AddConnector(way == "straight" ? 1 : way == "curve" || way == "curved" ? 3 : 2, 0, 0, 10, 10);
-                Dictionary<string, int> sides = new Dictionary<string, int> { { "top", 1 }, { "left", 2 }, { "bottom", 3 }, { "right", 4 } };
-                link.ConnectorFormat.BeginConnect((dynamic)a, 1);
-                link.ConnectorFormat.EndConnect((dynamic)b2, 1);
-                try { link.RerouteConnections(); } catch (Exception) { }
-                int side;
-                if (it.Has("fromSide") && sides.TryGetValue(it.Need("fromSide").ToLowerInvariant(), out side)) { try { link.ConnectorFormat.BeginConnect((dynamic)a, side); } catch (Exception) { } }
-                if (it.Has("toSide") && sides.TryGetValue(it.Need("toSide").ToLowerInvariant(), out side)) { try { link.ConnectorFormat.EndConnect((dynamic)b2, side); } catch (Exception) { } }
+                bool bent = way == "curve" || way == "curved";
+                dynamic link = p.Slide.Shapes.AddConnector(way == "straight" ? 1 : bent ? 3 : 2, 0, 0, 10, 10);
+                // Which sides face each other: boxes side by side join right to left, boxes above one another bottom
+                // to top. A curve is a jump over what lies between (a skip connection, a feedback): it leaves and
+                // arrives on the same side, above a row and to the right of a column.
+                dynamic sa = (dynamic)a, sb = (dynamic)b2;
+                double ax = (double)sa.Left, ay = (double)sa.Top, aw = (double)sa.Width, ah = (double)sa.Height;
+                double bx = (double)sb.Left, by = (double)sb.Top, bw = (double)sb.Width, bh = (double)sb.Height;
+                double dx = bx + bw / 2 - (ax + aw / 2), dy = by + bh / 2 - (ay + ah / 2);
+                bool apart = bx >= ax + aw || ax >= bx + bw, stacked = by >= ay + ah || ay >= by + bh;
+                bool across = apart && !stacked ? true : stacked && !apart ? false : Math.Abs(dx) >= Math.Abs(dy);
+                string leave, arrive;
+                if (bent) { leave = across ? "top" : "right"; arrive = leave; }
+                else if (across) { leave = dx >= 0 ? "right" : "left"; arrive = dx >= 0 ? "left" : "right"; }
+                else { leave = dy >= 0 ? "bottom" : "top"; arrive = dy >= 0 ? "top" : "bottom"; }
+                leave = it.Str("fromSide", leave).ToLowerInvariant();
+                arrive = it.Str("toSide", arrive).ToLowerInvariant();
+                link.ConnectorFormat.BeginConnect(sa, Site(sa, leave));
+                link.ConnectorFormat.EndConnect(sb, Site(sb, arrive));
                 link.Line.ForeColor.RGB = Bgr(Tone(p, it.Str("color", null), t.Muted));
                 link.Line.Weight = (float)(it.Num("weight", 1.5) * p.S);
                 if (!it.Has("arrow") || it.On("arrow")) { try { link.Line.EndArrowheadStyle = 2; } catch (Exception) { } }
@@ -7507,8 +7639,13 @@ static class Program
                 Track(p, link);
                 if (it.Has("label"))
                 {
-                    double mx = ((double)link.Left + (double)link.Width / 2 - p.Ox) / p.Sx, my = ((double)link.Top + (double)link.Height / 2 - p.Oy) / p.Sy;
-                    Label(p, mx - 70, my - 20, 140, 16, it.Need("label"), 10, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 4, null);
+                    // A connector that runs upright is a lying one turned by a quarter: its frame is given as it lay.
+                    double lw = (double)link.Width, lh = (double)link.Height, lcx = (double)link.Left + lw / 2, lcy = (double)link.Top + lh / 2;
+                    try { double turn = Math.Abs((double)link.Rotation) % 180; if (turn > 45 && turn < 135) { double swap = lw; lw = lh; lh = swap; } } catch (Exception) { }
+                    double mx = (lcx - p.Ox) / p.Sx, my = (lcy - p.Oy) / p.Sy;
+                    // The words stand over the line; over an arch they stand on its crown.
+                    if (bent && leave == "top" && arrive == "top") my = (lcy - lh / 2 - p.Oy) / p.Sy - 3;
+                    Label(p, mx - 90, my - 20, 180, 16, it.Need("label"), 10.5, Tone(p, it.Str("color", null), t.Muted), false, t.BodyFont, 2, 4, null);
                 }
                 continue;
             }
@@ -7529,7 +7666,9 @@ static class Program
             else if (type == "card")
             {
                 string tone = Tone(p, color, Pick(p, index - 1));
-                made = Block(p, b[0], b[1], b[2], b[3], Tone(p, fill, t.Surface), true);
+                string deckCards = t.Cards, own = it.Str("style", null);
+                if (own == "outline" || own == "shadow" || own == "soft") t.Cards = own;
+                try { made = Block(p, b[0], b[1], b[2], b[3], Tone(p, fill, t.Surface), true); } finally { t.Cards = deckCards; }
                 Block(p, b[0] + 16, b[1], 36, 4, tone, false);
                 double ty = b[1] + 18;
                 if (Icon(p, b[0] + 18, ty, 26, it.Str("icon", null), tone) != null) ty += 36;
@@ -7543,7 +7682,7 @@ static class Program
                 string shape = type == "circle" ? "circle" : it.Str("shape", it.Str("type", "") == "node" ? "round" : "rect");
                 string ground = Tone(p, fill ?? color, t.Surface);
                 if (shape == "circle") made = Dot(p, b[0] + b[2] / 2, b[1] + b[3] / 2, Math.Min(b[2], b[3]) / 2, ground);
-                else made = Block(p, b[0], b[1], b[2], b[3], ground, shape == "round" || shape == "rounded");
+                else { NativeBox = true; try { made = Block(p, b[0], b[1], b[2], b[3], ground, shape == "round" || shape == "rounded"); } finally { NativeBox = false; } }
                 if (it.Has("transparency")) { try { made.Fill.Transparency = (float)it.Num("transparency", 0); } catch (Exception) { } }
                 if (it.Has("text"))
                 {
@@ -7591,11 +7730,197 @@ static class Program
                 Draw(p, chart, b[0], b[1], b[2], b[3]);
             }
             else if (type == "icon") made = Icon(p, b[0], b[1], Math.Min(b[2], b[3]), it.Str("icon", it.Str("name", null)), Tone(p, color, t.Primary));
+            else if (type == "heading")
+            {
+                Block(p, b[0], b[1] + Math.Max(0, b[3] / 2 - 9), 4, 18, Tone(p, color, t.Accent), false);
+                made = Label(p, b[0] + 14, b[1], b[2] - 14, b[3], it.Str("text", ""), it.Num("size", 17), t.Text, true, t.BodyFont, 1, 3, t.Accent);
+            }
+            else if (type == "callout" || type == "note")
+            {
+                Block(p, b[0], b[1], b[2], b[3], Tone(p, fill, t.Surface), false);
+                Block(p, b[0], b[1], 4, b[3], Tone(p, color, t.Accent), false);
+                made = Label(p, b[0] + 18, b[1], b[2] - 30, b[3], it.Str("text", ""), it.Num("size", 13.5), t.Text, false, t.BodyFont, 1, 3, t.Accent);
+            }
+            else if (type == "quote")
+            {
+                Label(p, b[0], b[1] - 4, 50, 50, "\u201C", 48, Tone(p, color, t.Accent), true, t.TitleFont, 1, 1, null);
+                made = Label(p, b[0] + 54, b[1] + 8, b[2] - 62, Math.Max(20, b[3] - (it.Has("by") ? 40 : 12)), it.Str("text", ""), it.Num("size", 20), t.Text, false, t.TitleFont, 1, 3, t.Primary);
+                if (it.Has("by")) Label(p, b[0] + 54, b[1] + b[3] - 28, b[2] - 62, 22, "\u2014\u2014 " + it.Need("by"), 12, t.Muted, false, t.BodyFont, 1, 3, null);
+            }
+            else if (type == "table")
+            {
+                IList data = it.List("data");
+                if (data == null || data.Count == 0) throw new Fail("BAD_ARGS", "Item " + index + " (table) needs \"data\": rows of cells, the header first.");
+                int tr = Math.Min(data.Count, 10), tc = 1;
+                foreach (object row in data) { IList cells = row as IList; if (cells != null) tc = Math.Max(tc, cells.Count); }
+                double rowHigh = Math.Min(44, b[3] / tr);
+                DrawnTable(p, data, tr, tc, b[0], b[1] + Math.Max(0, (b[3] - rowHigh * tr) / 2), b[2], rowHigh, it.Num("size", tr > 6 || tc > 5 ? 11.5 : 13));
+            }
+            else if (type == "steps")
+            {
+                // Numbered steps one under another: a disc with the number, the head, the text beside it.
+                IList steps = Items(it, "steps", "points", "items");
+                int sn = Math.Max(1, Math.Min(steps.Count, 6));
+                double each = Math.Min(86, b[3] / sn), sy0 = b[1] + (b[3] - each * sn) / 2;
+                for (int s = 0; s < sn; s++)
+                {
+                    double cy = sy0 + s * each;
+                    string tone = Pick(p, s), sh = Field(steps[s], "head"), st = Field(steps[s], "text") ?? "";
+                    if (s < sn - 1) Rule(p, b[0] + 15, cy + 30, b[0] + 15, cy + each, t.Line, 1);
+                    Dot(p, b[0] + 15, cy + 15, 15, tone);
+                    Label(p, b[0], cy, 30, 30, (s + 1).ToString(), 13, t.Dark ? t.Bg : "#FFFFFF", true, t.TitleFont, 2, 3, null);
+                    if (sh != null) { Label(p, b[0] + 44, cy, b[2] - 44, 30, sh, 15, t.Text, true, t.BodyFont, 1, 3, null); Label(p, b[0] + 44, cy + 30, b[2] - 44, each - 34, st, 12.5, t.Muted, false, t.BodyFont, 1, 1, t.Accent); }
+                    else made = Label(p, b[0] + 44, cy, b[2] - 44, each - 6, st, 14, t.Text, false, t.BodyFont, 1, each > 40 ? 1 : 3, t.Accent);
+                }
+            }
             else if (type == "bullets" || type == "points") Bullets(p, it, b[0], b[1], b[2], b[3], false);
-            else throw new Fail("BAD_ARGS", "Item " + index + " of the canvas has the unknown type \"" + type + "\": use text, title, card, panel, node, circle, line, arrow, edge, image, figure, formula, stat, chart, icon or bullets.");
+            else throw new Fail("BAD_ARGS", "Item " + index + " of the canvas has the unknown type \"" + type + "\": use text, title, heading, card, panel, node, circle, line, arrow, edge, image, figure, formula, stat, chart, table, icon, bullets, steps, callout or quote.");
             if (made != null && it.Has("name")) { try { made.Name = it.Need("name"); } catch (Exception) { } }
             if (made != null && it.Has("id")) known[it.Need("id")] = made;
         }
+    }
+
+    /// The number of the connection site in the middle of a side: a box has four, a circle eight, counted from the top against the clock.
+    static int Site(dynamic shape, string side)
+    {
+        int count = 4;
+        try { count = (int)shape.ConnectionSiteCount; } catch (Exception) { }
+        int quarter = side == "left" ? 1 : side == "bottom" ? 2 : side == "right" ? 3 : 0;
+        if (count == 8) return 1 + quarter * 2;
+        return Math.Max(1, Math.Min(count, 1 + quarter));
+    }
+
+    /// How tall a part of a grid is when nothing says so: 0 for parts that take what room there is.
+    static double GridHigh(Bag cell, double w)
+    {
+        string type = cell.Str("type", "text").ToLowerInvariant();
+        if (cell.Has("height")) return cell.Num("height", 0);
+        if (type == "heading") return 34;
+        if (type == "node") return 72;
+        if (type == "space" || type == "empty") return -1;
+        if (type == "callout" || type == "note") return 46;
+        if (type == "stat") return 118;
+        if (type == "formula") return cell.Has("label") ? 96 : 78;
+        if (type == "line") return 2;
+        if (type == "text" || type == "title")
+        {
+            double size = cell.Num("size", type == "title" ? 24 : 14);
+            string words = Lines(cell.Raw("text") ?? "");
+            double lines = 0;
+            foreach (string line in words.Split('\r', '\n')) lines += Math.Max(1, Math.Ceiling(line.Length * size * 0.98 / Math.Max(40, w)));
+            return lines * size * 1.5 + 10;
+        }
+        return 0;
+    }
+
+    /// Rows of parts, one under another, each row its cells side by side: every part gets its box, with even gaps.
+    static void GridRows(IList rows, double x, double y, double w, double h, List<object> placed)
+    {
+        double gapX = 20, gapY = 16;
+        // Boxes that are joined by arrows stand further apart, so the arrows have room.
+        foreach (object row in rows)
+        {
+            IList listed = row as IList;
+            if (listed == null && row is Dictionary<string, object> && ((Dictionary<string, object>)row).ContainsKey("cells")) listed = ((Dictionary<string, object>)row)["cells"] as IList;
+            if (listed != null) foreach (object c in listed) { Dictionary<string, object> d = c as Dictionary<string, object>; if (d != null && d.ContainsKey("type") && Convert.ToString(d["type"]) == "node") { gapX = 46; gapY = 40; } }
+        }
+        int n = rows.Count;
+        if (n == 0) return;
+        List<IList> cellsOf = new List<IList>();
+        double[] high = new double[n], weight = new double[n];
+        double taken = gapY * (n - 1), weights = 0;
+        for (int r = 0; r < n; r++)
+        {
+            object raw = rows[r];
+            IList cells = raw as IList;
+            double given = 0, share = 1;
+            Dictionary<string, object> asRow = raw as Dictionary<string, object>;
+            if (cells == null && asRow != null && asRow.ContainsKey("cells"))
+            {
+                cells = asRow["cells"] as IList;
+                if (asRow.ContainsKey("height") && asRow["height"] != null) given = Number(asRow["height"]);
+                if (asRow.ContainsKey("weight") && asRow["weight"] != null) share = Math.Max(0.1, Number(asRow["weight"]));
+            }
+            if (cells == null) { List<object> single = new List<object>(); single.Add(raw); cells = single; }
+            if (cells.Count == 0) throw new Fail("BAD_ARGS", "Row " + (r + 1) + " of the grid is empty.");
+            cellsOf.Add(cells);
+            double spans = 0;
+            foreach (object c in cells) spans += Math.Max(0.1, new Bag(c).Num("span", 1));
+            double fixedHigh = 0;
+            bool open = false;
+            foreach (object c in cells)
+            {
+                Bag cell = new Bag(c);
+                double cw = (w - gapX * (cells.Count - 1)) * Math.Max(0.1, cell.Num("span", 1)) / spans;
+                double one = GridHigh(cell, cw);
+                if (one == 0) open = true; else fixedHigh = Math.Max(fixedHigh, one);
+                if (cell.Has("weight")) share = Math.Max(share, cell.Num("weight", 1));
+            }
+            high[r] = given > 0 ? given : open ? 0 : fixedHigh;
+            weight[r] = high[r] > 0 ? 0 : share;
+            taken += high[r];
+            weights += weight[r];
+        }
+        double rest = h - taken;
+        if (weights > 0) { for (int r = 0; r < n; r++) if (weight[r] > 0) high[r] = Math.Max(48, rest * weight[r] / weights); }
+        double used = gapY * (n - 1);
+        for (int r = 0; r < n; r++) used += high[r];
+        // More than fits: every row gives way by the same share. Less: the group stands in the middle.
+        double squeeze = used > h ? (h - gapY * (n - 1)) / (used - gapY * (n - 1)) : 1;
+        double cy = weights > 0 || used > h ? y : Settle(y, h, used);
+        for (int r = 0; r < n; r++)
+        {
+            IList cells = cellsOf[r];
+            double rh = high[r] * squeeze, spans = 0, cx = x;
+            foreach (object c in cells) spans += Math.Max(0.1, new Bag(c).Num("span", 1));
+            foreach (object c in cells)
+            {
+                Dictionary<string, object> source = c as Dictionary<string, object>;
+                Bag cell = new Bag(c);
+                double cw = (w - gapX * (cells.Count - 1)) * Math.Max(0.1, cell.Num("span", 1)) / spans;
+                string type = cell.Str("type", "text").ToLowerInvariant();
+                if (type == "stack" || type == "column" || type == "rows")
+                {
+                    IList inner = cell.List("items") ?? cell.List("rows");
+                    if (inner == null || inner.Count == 0) throw new Fail("BAD_ARGS", "A stack in the grid needs \"items\": the parts that stand one under another.");
+                    GridRows(inner, cx, cy, cw, rh, placed);
+                }
+                else if (type != "space" && type != "empty")
+                {
+                    Dictionary<string, object> copy = new Dictionary<string, object>(source);
+                    copy.Remove("span"); copy.Remove("weight"); copy.Remove("height");
+                    double bh = rh, by = cy;
+                    // A rule is a line across its cell, not a box.
+                    if (type == "line") { bh = 0; by = cy + rh / 2; }
+                    copy["box"] = new List<object> { cx, by, cw, bh };
+                    if ((type == "text" || type == "stat") && !copy.ContainsKey("valign") && cells.Count > 1) copy["valign"] = "middle";
+                    placed.Add(copy);
+                }
+                cx += cw + gapX;
+            }
+            cy += rh + gapY;
+        }
+    }
+
+    /// A slide put together from parts in rows and columns: the places are worked out here, the parts are those of a canvas.
+    static void Grid(Page p, Bag op, double x, double y, double w, double h)
+    {
+        IList rows = op.List("rows");
+        if (rows == null || rows.Count == 0) throw new Fail("BAD_ARGS", "A grid slide needs \"rows\": [[part, part], [part], ..] - each row a list of parts {type, span?, ..} that stand side by side.");
+        bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
+        List<object> placed = new List<object>();
+        GridRows(rows, x, y + 4, w, h - 4 - (callout ? 54 : 0), placed);
+        IList edges = op.List("edges");
+        if (edges != null) foreach (object e in edges)
+        {
+            Dictionary<string, object> edge = new Dictionary<string, object>((Dictionary<string, object>)e);
+            edge["type"] = "edge";
+            placed.Add(edge);
+        }
+        Dictionary<string, object> made = new Dictionary<string, object>();
+        made["items"] = placed;
+        Canvas(p, new Bag(made));
+        Callout(p, op, x, y + h - 42, w);
     }
 
     static readonly System.Text.RegularExpressions.Regex CodeParts = new System.Text.RegularExpressions.Regex(
@@ -8058,7 +8383,7 @@ static class Program
         bool callout = !string.IsNullOrEmpty(op.Str("callout", null));
         bool math = false;
         foreach (object row in data) { IList cells = row as IList; if (cells != null) foreach (object cell in cells) if (cell != null && Convert.ToString(cell).IndexOf('$') >= 0) math = true; }
-        double usable = h - (callout ? 54 : 0), rowHeight = Math.Min(math ? 56 : 46, usable / rows);
+        double usable = h - (callout ? 54 : 0), rowHeight = Math.Min(math ? 58 : rows <= 5 ? 54 : 46, usable / rows);
         double tableTop = Settle(y, usable, rowHeight * rows);
         if (math || op.Flag("drawn", false))
         {
@@ -8147,7 +8472,21 @@ static class Program
         Unit(p);
         Draw(p, chart, x, y, cw, ch);
         double sx = x + cw + 30, sy = y + 6, sw = w - cw - 30;
-        for (int i = 0; i < Math.Min(side.Count, 4); i++)
+        // Few remarks are set a little larger, and what is left of the height goes between them in equal parts,
+        // so the column ends where the chart ends instead of stopping half way down.
+        int shown = Math.Min(side.Count, 4);
+        double k = shown <= 2 ? 1.15 : shown == 3 ? 1.06 : 1, sum = 0;
+        double[] wordsHigh = new double[shown];
+        for (int i = 0; i < shown; i++)
+        {
+            string words0 = Field(side[i], "text") ?? "";
+            double lines = Math.Max(1, Math.Ceiling(words0.Length * 13 * k * 0.98 / sw));
+            wordsHigh[i] = lines * 13 * k * 1.55 + 8;
+            sum += Field(side[i], "value") != null ? 104 : 10 + (Field(side[i], "head") != null ? 26 * k : 0) + wordsHigh[i] + 12;
+        }
+        double air = shown == 0 ? 0 : Math.Max(0, Math.Min(90, (ch - 16 - sum) / shown));
+        sy += air / 2;
+        for (int i = 0; i < shown; i++)
         {
             Unit(p);
 
@@ -8163,13 +8502,13 @@ static class Program
                 if (unit != null) { try { dynamic tail = big.TextFrame.TextRange.Characters(value.Length + 1, unit.Length + 1); tail.Font.Size = (float)(15 * p.S); tail.Font.Bold = 0; tail.Font.Color.RGB = Bgr(t.Text); } catch (Exception) { } }
                 Words(p, sx, sy + 56, sw, 40, text, 12, t.Muted, false);
                 p.Motion.Add(big);
-                sy += 104;
+                sy += 104 + air;
                 continue;
             }
-            if (head != null) { Words(p, sx, sy + 10, sw, 22, head, 14.5, t.Text, true); sy += 26; }
-            dynamic words = Words(p, sx, sy + 10, sw, 62, text, 13, head != null ? t.Muted : t.Text, false);
+            if (head != null) { Words(p, sx, sy + 10, sw, 22 * k, head, 14.5 * k, t.Text, true); sy += 26 * k; }
+            dynamic words = Words(p, sx, sy + 10, sw, wordsHigh[i], text, 13 * k, head != null ? t.Muted : t.Text, false);
             p.Motion.Add(words);
-            sy += head != null ? 62 : 74;
+            sy += 10 + wordsHigh[i] + 12 + air;
         }
         Callout(p, op, x, y + h - 42, w);
     }
