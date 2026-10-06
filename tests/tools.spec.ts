@@ -145,6 +145,7 @@ describe('office tools', () => {
     expect((await run('office_help', { app: 'word' })).text).toContain('insert_diagram {')
     expect((await run('office_help', { app: 'ppt' })).text).toContain('grid {title, rows')
     expect((await run('office_help', { app: 'ppt' })).text).toContain('layout?: focus|side|stack')
+    expect((await run('office_help', { app: 'ppt' })).text).toContain('chrome?: plain|beamer')
     expect(sheets.text).toContain('clean {')
   })
 
