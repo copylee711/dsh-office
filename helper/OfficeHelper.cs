@@ -6004,6 +6004,11 @@ static class Program
         /// the ground of a card (soft = a tinted fill, outline = a thin frame, shadow = white with a soft shadow)
         /// and the mark before a point (square, dot, dash).
         public string Corners = "soft", Cards = "soft", Marks = "square";
+        /// The frame around every slide: "" (a dash, the title, a thin rule) or "beamer" (the look of a LaTeX
+        /// Beamer talk: the title on a band across the top, a foot line with the speaker, the talk and the page).
+        public string Chrome = "";
+        /// What the foot line of a beamer deck says at the left and in the middle.
+        public string Author = "", Talk = "";
         /// A slide of the deck every designed slide is drawn on (a template's background page), 0 = a blank slide.
         public int Base;
         /// The part of the slide the content may use: left, top, width, height in points (empty = all of it).
@@ -6068,6 +6073,18 @@ static class Program
             else if (File.Exists(ground)) t.Texture = "image:" + Path.GetFullPath(ground);
             else throw new Fail("BAD_ARGS", "\"background\" is plain, paper, gradient, grid or dots, or the path of a picture to lay faintly behind every slide; \"" + ground + "\" is neither.");
         }
+        if (op.Has("chrome"))
+        {
+            string chrome = op.Need("chrome").ToLowerInvariant();
+            if (chrome == "plain" || chrome == "none" || chrome == "default") chrome = "";
+            if (chrome != "" && chrome != "beamer") throw new Fail("BAD_ARGS", "\"chrome\" is plain or beamer.");
+            // A Beamer talk has triangles before its points, unless something else is asked for.
+            if (chrome == "beamer" && t.Chrome != "beamer" && !op.Has("marks")) t.Marks = "triangle";
+            t.Chrome = chrome;
+        }
+        if (t.Chrome == null) t.Chrome = "";
+        if (op.Has("author")) t.Author = op.Need("author");
+        if (op.Has("talk")) t.Talk = op.Need("talk");
         if (op.Has("corners")) t.Corners = op.Need("corners").ToLowerInvariant();
         if (op.Has("cards")) t.Cards = op.Need("cards").ToLowerInvariant();
         if (op.Has("marks")) t.Marks = op.Need("marks").ToLowerInvariant();
@@ -6076,7 +6093,7 @@ static class Program
         if (t.Marks == null) t.Marks = "square";
         if (t.Corners != "soft" && t.Corners != "square" && t.Corners != "round" && t.Corners != "pill") throw new Fail("BAD_ARGS", "\"corners\" is soft, square, round or pill.");
         if (t.Cards != "soft" && t.Cards != "outline" && t.Cards != "shadow") throw new Fail("BAD_ARGS", "\"cards\" is soft (a tinted ground), outline (a thin frame) or shadow (white with a soft shadow).");
-        if (t.Marks != "square" && t.Marks != "dot" && t.Marks != "dash") throw new Fail("BAD_ARGS", "\"marks\" is square, dot or dash.");
+        if (t.Marks != "square" && t.Marks != "dot" && t.Marks != "dash" && t.Marks != "triangle") throw new Fail("BAD_ARGS", "\"marks\" is square, dot, dash or triangle.");
         if (op.Has("section")) t.Section = op.Need("section").ToLowerInvariant();
         // Decks should not all open their parts the same way: unless told, one of the looks is taken by chance.
         if (string.IsNullOrEmpty(t.Section)) t.Section = new string[] { "solid", "side", "band", "number" }[new Random().Next(4)];
@@ -6247,6 +6264,12 @@ static class Program
         bool mark = !rounded && fill != null && w == h && w <= 8;
         if (mark && marks == "dash") { y += h / 2 - 1; h = 2; w = w * 1.8; }
         dynamic shape = null;
+        if (mark && marks == "triangle")
+        {
+            // A small triangle pointing at the words, as LaTeX sets its lists.
+            shape = p.Slide.Shapes.AddShape(7, PX(p, x), PY(p, y - 1), Math.Max(0.5f, SX(p, w)), Math.Max(0.5f, SY(p, h + 2)));
+            try { shape.Rotation = 90f; } catch (Exception) { }
+        }
         // WPS does not let the roundness of a rounded box be set: it stays a sixth of the short side, which on a
         // card is a bubble. There the outline is drawn: straight sides, each corner a short run of small steps.
         if (Suite == "wps" && rounded && !NativeBox && (corners == "soft" || corners == "round") && Math.Min(w, h) > 60)
@@ -6269,7 +6292,7 @@ static class Program
             }
             catch (Exception error) { Trace("drawn card: " + error.Message.Trim()); shape = null; }
         }
-        if (shape == null) shape = p.Slide.Shapes.AddShape(mark && marks == "dot" ? 9 : rounded && corners != "square" ? 5 : 1, PX(p, x), PY(p, y), Math.Max(0.5f, SX(p, w)), Math.Max(0.5f, SY(p, h)));
+        if ((object)shape == null) shape = p.Slide.Shapes.AddShape(mark && marks == "dot" ? 9 : rounded && corners != "square" ? 5 : 1, PX(p, x), PY(p, y), Math.Max(0.5f, SX(p, w)), Math.Max(0.5f, SY(p, h)));
         shape.Line.Visible = 0;
         if (fill == null) shape.Fill.Visible = 0;
         else
@@ -6281,7 +6304,11 @@ static class Program
         if (rounded && corners != "square") Round(shape, corners == "pill" ? 0.5 : (corners == "round" ? 18.0 : 8.0) / Math.Max(1, Math.Min(w, h)));
         try { shape.Shadow.Visible = 0; } catch (Exception) { }
         // The ground of a card, as the deck has it.
-        if (rounded && fill != null && fill == p.T.Surface && w > 60 && h > 30 && !p.Based)
+        if (rounded && fill != null && fill == p.T.Surface && w > 60 && h > 30 && !p.Based && p.T.Chrome == "beamer" && cards == "soft")
+        {
+            shape.Fill.ForeColor.RGB = Bgr(Mix(p.T.Primary, p.T.Bg, 0.9));
+        }
+        else if (rounded && fill != null && fill == p.T.Surface && w > 60 && h > 30 && !p.Based)
         {
             if (cards == "outline")
             {
@@ -6682,6 +6709,23 @@ static class Program
                 return start;
             }
         }
+        if (t.Chrome == "beamer")
+        {
+            // A strip with the section, the title on a band under it, the foot line: the frame of a Beamer slide.
+            string where = op.Str("kicker", null), said = op.Str("title", ""), under = op.Str("subtitle", null);
+            string onBand = t.Dark ? t.Bg : "#FFFFFF";
+            Block(p, 0, 0, 960, 20, Mix(t.Primary, "#000000", 0.35), false);
+            if (!string.IsNullOrEmpty(where)) Label(p, 24, 0, 912, 20, where, 9.5, onBand, false, t.BodyFont, 1, 3, null).Name = "Kicker";
+            double band = string.IsNullOrEmpty(under) ? 56 : 76;
+            Block(p, 0, 20, 960, band, t.Primary, false);
+            dynamic headline = Label(p, 24, 20, 912, 56, said, said.Length > 28 ? 21 : 24, onBand, true, t.TitleFont, 1, 3, null);
+            headline.Name = "Title";
+            if (!string.IsNullOrEmpty(under)) Label(p, 24, 68, 912, 24, under, 12.5, onBand, false, t.BodyFont, 1, 1, null).Name = "Subtitle";
+            FootLine(p);
+            string source = op.Str("note", null);
+            if (!string.IsNullOrEmpty(source)) Label(p, 48, 500, 864, 14, source, 9, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Note";
+            return 20 + band + 22;
+        }
         Block(p, 48, 40, 26, 3, t.Accent, false);
         string kicker = op.Str("kicker", null);
         if (!string.IsNullOrEmpty(kicker)) Label(p, 48, 50, 640, 16, kicker, 10.5, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Kicker";
@@ -6704,6 +6748,55 @@ static class Program
         string note = op.Str("note", null);
         if (!string.IsNullOrEmpty(note)) Label(p, 48, 506, 864, 14, note, 9, t.Muted, false, t.BodyFont, 1, 1, null).Name = "Note";
         return y + 18;
+    }
+
+    /// The foot line of a Beamer slide: who speaks, what the talk is called, which page this is.
+    static void FootLine(Page p)
+    {
+        Theme t = p.T;
+        string ink = t.Dark ? t.Bg : "#FFFFFF";
+        Block(p, 0, 520, 320, 20, Mix(t.Primary, "#000000", 0.35), false);
+        Block(p, 320, 520, 320, 20, Mix(t.Primary, "#000000", 0.15), false);
+        Block(p, 640, 520, 320, 20, t.Primary, false);
+        if (!string.IsNullOrEmpty(t.Author)) Label(p, 8, 520, 304, 20, t.Author, 9, ink, false, t.BodyFont, 2, 3, null).Name = "FootAuthor";
+        if (!string.IsNullOrEmpty(t.Talk)) Label(p, 328, 520, 304, 20, t.Talk, 9, ink, false, t.BodyFont, 2, 3, null).Name = "FootTalk";
+        Label(p, 648, 520, 300, 20, "", 9, ink, false, t.BodyFont, 3, 3, null).Name = "PageNumber";
+    }
+
+    /// The title page, the last page and the pages between the parts of a Beamer talk: the words in the middle, the title in a box.
+    static void BeamerTitle(dynamic deck, Page p, Bag op, string kind)
+    {
+        Theme t = p.T;
+        string title = op.Str("title", ""), subtitle = op.Str("subtitle", null), meta = op.Str("meta", null), kicker = op.Str("kicker", null), number = op.Str("number", null);
+        string ink = t.Dark ? t.Bg : "#FFFFFF";
+        if (kind == "cover")
+        {
+            // The foot line of the pages that follow says who speaks and what about, unless the theme was told.
+            bool changed = false;
+            if (string.IsNullOrEmpty(t.Talk) && title.Length > 0) { t.Talk = title; changed = true; }
+            if (string.IsNullOrEmpty(t.Author) && !string.IsNullOrEmpty(meta)) { t.Author = meta.Split('\n', '\r', '|', '·', '　')[0].Trim(); changed = true; }
+            if (changed) { try { deck.Tags.Add("DSHTHEME", Json.Serialize(t)); } catch (Exception) { } }
+        }
+        Block(p, 0, 0, 960, 20, Mix(t.Primary, "#000000", 0.35), false);
+        bool part = kind == "section";
+        double boxHigh = subtitle != null && !part ? 128 : 96, top = part ? 200 : 150;
+        if (!string.IsNullOrEmpty(kicker)) Label(p, 120, top - 40, 720, 22, kicker, 13, t.Muted, false, t.BodyFont, 2, 3, null).Name = "Kicker";
+        if (part && !string.IsNullOrEmpty(number)) Label(p, 120, top - 44, 720, 28, number, 18, t.Primary, true, t.TitleFont, 2, 3, null).Name = "Number";
+        Unit(p);
+        bool wasNative = NativeBox;
+        Block(p, 120, top, 720, boxHigh, t.Primary, true);
+        dynamic head = Label(p, 140, top + (subtitle != null && !part ? 12 : 0), 680, subtitle != null && !part ? 70 : boxHigh, title, title.Length > 20 ? 28 : 34, ink, true, t.TitleFont, 2, 3, null);
+        head.Name = "Title";
+        p.Motion.Add(head);
+        NativeBox = wasNative;
+        double y = top + boxHigh + 26;
+        if (!string.IsNullOrEmpty(subtitle))
+        {
+            if (part) { Unit(p); dynamic sub = Label(p, 120, y, 720, 30, subtitle, 16, t.Text, false, t.BodyFont, 2, 1, null); sub.Name = "Subtitle"; p.Motion.Add(sub); y += 44; }
+            else Label(p, 140, top + 80, 680, 36, subtitle, 16, ink, false, t.BodyFont, 2, 1, null).Name = "Subtitle";
+        }
+        if (!string.IsNullOrEmpty(meta)) { Unit(p); dynamic who = Label(p, 120, y + 6, 720, 90, meta, 15, t.Text, false, t.BodyFont, 2, 1, null); who.Name = "Meta"; p.Motion.Add(who); }
+        FootLine(p);
     }
 
     /// The sample content of a template page that lies in the area about to be drawn on: texts and pictures whose
@@ -6793,6 +6886,14 @@ static class Program
 
         string image = op.Str("image", null);
         Focus = op.Str("focus", null);
+        if (t.Chrome == "beamer" && !p.Based && image == null && (kind == "cover" || kind == "closing" || kind == "section"))
+        {
+            BeamerTitle(deck, p, op, kind);
+            if (op.Has("notes")) { try { p.Slide.NotesPage.Shapes.Placeholders[2].TextFrame.TextRange.Text = Lines(op.Raw("notes")); } catch (Exception) { } }
+            Move(p);
+            Renumber = true;
+            return "slide " + index + " added (" + kind + ", theme " + t.Name + ", beamer)";
+        }
         if (kind == "cover" || kind == "closing")
         {
             bool cover = kind == "cover";
@@ -7119,7 +7220,9 @@ static class Program
                 {
                     if ((string)shape.Name != "PageNumber") continue;
                     int n = (int)slide.SlideIndex;
-                    shape.TextFrame.TextRange.Text = n.ToString("00") + " / " + total.ToString("00");
+                    bool foot = false;
+                    try { foot = (double)shape.Top > (double)deck.PageSetup.SlideHeight * 0.9; } catch (Exception) { }
+                    shape.TextFrame.TextRange.Text = foot ? n + " / " + total : n.ToString("00") + " / " + total.ToString("00");
                 }
             }
         }
@@ -7681,10 +7784,25 @@ static class Program
         double sh = head + 34 + Math.Ceiling(statement.Length / 40.0) * 30 + (tall ? 26 : 0);
         sh = Math.Max(96, Math.Min(sh, usable * (proof.Count > 0 ? 0.52 : 0.9)));
         Unit(p);
-        Block(p, x, y, w, sh, t.Surface, false);
-        Block(p, x, y, 6, sh, t.Accent, false);
         double ty = y + 16;
-        if (head > 0)
+        bool block = t.Chrome == "beamer";
+        if (block)
+        {
+            // A block as Beamer sets it: the kind and the name on a band of the main colour, the statement on a tint of it under that.
+            string over = ((label ?? "") + (label != null && name != null ? "　" : "") + (name ?? "")).Trim();
+            if (over.Length == 0) over = "定理";
+            sh += head > 0 ? 0 : 36;
+            Block(p, x, y, w, sh, Mix(t.Primary, t.Bg, 0.9), false);
+            Block(p, x, y, w, 32, t.Primary, false);
+            Label(p, x + 16, y, w - 32, 32, over, 14, t.Dark ? t.Bg : "#FFFFFF", true, t.BodyFont, 1, 3, null).Name = "Label";
+            ty = y + 44;
+        }
+        else
+        {
+            Block(p, x, y, w, sh, t.Surface, false);
+            Block(p, x, y, 6, sh, t.Accent, false);
+        }
+        if (head > 0 && !block)
         {
             double cw = string.IsNullOrEmpty(label) ? 0 : label.Length * 15 + 26;
             if (cw > 0)
@@ -7695,7 +7813,7 @@ static class Program
             if (!string.IsNullOrEmpty(name)) Label(p, x + 26 + (cw > 0 ? cw + 12 : 0), ty, w - 64 - cw, 24, name, 12.5, t.Primary, true, t.BodyFont, 1, 3, null).Name = "Name";
             ty += 34;
         }
-        dynamic said = Label(p, x + 26, ty, w - 52, y + sh - ty - 12, statement, 15.5, t.Text, false, t.TitleFont, 1, 3, t.Accent);
+        dynamic said = Label(p, x + (block ? 16 : 26), ty, w - (block ? 32 : 52), y + sh - ty - 12, statement, 15.5, t.Text, false, t.TitleFont, 1, 3, t.Accent);
         said.Name = "Statement";
         p.Motion.Add(said);
         double py = y + sh + 16;
