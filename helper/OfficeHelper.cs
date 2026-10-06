@@ -1910,6 +1910,23 @@ static class Program
         catch (Exception) { UserMode = 3; }
     }
 
+    /// The throwaway character put after an equation while it is built (a word joiner: no width, never typed).
+    const char Pad = '⁠';
+
+    /// Takes out what is left, right after the equation, of the run put there before it was built.
+    static void Unpad(dynamic doc, dynamic built, int padded)
+    {
+        try
+        {
+            int end = (int)built.Range.End, limit = Math.Min(end + padded, (int)doc.Content.End);
+            string tail = limit > end ? ((string)doc.Range(end, limit).Text ?? "") : "";
+            int left = 0;
+            while (left < tail.Length && tail[left] == Pad) left++;
+            if (left > 0) doc.Range(end, end + left).Delete();
+        }
+        catch (COMException error) { Trace("equation, taking the padding out: " + error.Message.Trim()); }
+    }
+
     static bool BuildOne(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m, bool display, string source, Dictionary<string, string> linear)
     {
         // \tag{1} numbers a display equation: Word sets "#(1)" flush right on the equation's line.
@@ -1928,12 +1945,25 @@ static class Program
         string read;
         bool byWord = linear.TryGetValue(source, out read);
         // Not read by Word (an environment it lacks, a command it does not know): the helper's own conversion.
-        spot.Text = (byWord ? read : Tex(source)) + (string.IsNullOrEmpty(tag) ? "" : "#(" + tag + ")");
+        string written = (byWord ? read : Tex(source)) + (string.IsNullOrEmpty(tag) ? "" : "#(" + tag + ")");
+        spot.Text = written;
+        // Word, building up a script that holds a function name (T_min, x_max), takes as many characters as the name
+        // has from whatever follows the equation: text of the line, or the mark that ends the paragraph. A run of
+        // throwaway characters is put there for it to take, and what is left of the run is removed afterwards.
+        int padded = 0;
+        try
+        {
+            int after = (int)spot.End;
+            padded = Math.Min(written.Length, 64);
+            doc.Range(after, after).InsertAfter(new string(Pad, padded));
+        }
+        catch (COMException) { padded = 0; }
         try
         {
             dynamic math = doc.OMaths.Add(spot);
             dynamic built = math.OMaths[1];
-            built.BuildUp();
+            try { built.BuildUp(); }
+            finally { if (padded > 0) Unpad(doc, built, padded); }
             bool good = true;
             if (!byWord) { try { good = ((string)math.OMaths[1].Range.Text ?? "").IndexOf('\\') < 0; } catch (COMException) { } }
             if (display) { try { built.Type = 0; built.Justification = 1; } catch (COMException) { } }
@@ -2026,6 +2056,9 @@ static class Program
         bool full = a.Flag("full", false);
         List<object> items = new List<object>();
         int shown = from - 1, openTable = -1;
+        // Tables whose paragraphs are listed one by one, already announced: coming back to one after a table inside it
+        // does not announce it again.
+        HashSet<int> announced = new HashSet<int>();
         string titleStyle = null;
         try { titleStyle = (string)doc.Styles[-63].NameLocal; } catch (Exception) { }
         if (from <= total)
@@ -2051,6 +2084,7 @@ static class Program
                 {
                     dynamic table = p.Range.Tables[1];
                     int tableStart = (int)table.Range.Start, end = (int)table.Range.End;
+                    if (tableStart != openTable && announced.Contains(tableStart)) openTable = tableStart;
                     if (tableStart != openTable)
                     {
                         int inside = (int)table.Range.Paragraphs.Count, rows = (int)table.Rows.Count, cells;
@@ -2060,8 +2094,11 @@ static class Program
                         bool nested = false;
                         try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
                         Dictionary<string, object> head = new Dictionary<string, object>();
-                        head["i"] = i;
-                        head["to"] = i + inside - 1;
+                        // A read that starts part-way into a table still names the table's own first and last paragraph.
+                        int last = i + inside - 1;
+                        try { last = (int)doc.Range(0, end).Paragraphs.Count; } catch (COMException) { }
+                        head["i"] = Math.Min(i, last - inside + 1);
+                        head["to"] = last;
                         if (!nested) head["table"] = (int)doc.Range(0, end).Tables.Count;
                         string size = "?";
                         try { size = rows + "x" + (int)table.Columns.Count; } catch (COMException) { size = cells + " cells"; }
@@ -2073,12 +2110,13 @@ static class Program
                         items.Add(head);
                         if (!open)
                         {
-                            i += inside - 1;
+                            i = last;
                             p = i < total ? doc.Range(end, end).Paragraphs[1] : null;
                             shown = i;
                             continue;
                         }
                         openTable = tableStart;
+                        announced.Add(tableStart);
                     }
                     bool rowEnd = false;
                     try { rowEnd = Truthy(p.Range.Information[31]); } catch (Exception) { }
@@ -2196,7 +2234,13 @@ static class Program
         if (where == "after") return After(doc, anchor);
         if (where != "before" && where != "start") throw new Fail("BAD_ARGS", "\"where\" must be after, before, start or end.");
         int start = (int)anchor.Range.Start;
-        anchor.Range.InsertParagraphBefore();
+        try { anchor.Range.InsertParagraphBefore(); }
+        catch (COMException)
+        {
+            // The last paragraph of a cell, when a table sits right before it in that cell: Word refuses the paragraph
+            // as a whole (it ends in the mark of the cell) and takes a paragraph mark typed at its start.
+            doc.Range(start, start).InsertBefore("\r");
+        }
         return doc.Range(start, start).Paragraphs[1];
     }
 
@@ -2235,7 +2279,12 @@ static class Program
     static dynamic After(dynamic doc, dynamic paragraph)
     {
         int end = (int)paragraph.Range.End;
-        paragraph.Range.InsertParagraphAfter();
+        try { paragraph.Range.InsertParagraphAfter(); }
+        catch (COMException)
+        {
+            // See NewParagraph: the last paragraph of a cell with a table right before it. The mark goes in before its own.
+            doc.Range(end - 1, end - 1).InsertAfter("\r");
+        }
         dynamic made = doc.Range(end, end).Paragraphs[1];
         // Word gives the new paragraph the look of whatever FOLLOWS (a caption, a heading); it should
         // continue the paragraph it was added after.
@@ -2498,6 +2547,35 @@ static class Program
         return moved + " paragraph(s) brought before " + blocks + " figure(s) / table(s) to fill the space that was left empty at the foot of the page before them; look at those pages";
     }
 
+    /// Removes every table that lies wholly inside the range, at any depth of nesting; the range shrinks with them.
+    static int DropTables(dynamic gone)
+    {
+        List<object> whole = new List<object>();
+        try { WholeTables(gone.Tables, (int)gone.Start, (int)gone.End, whole, 0); }
+        catch (Exception) { return 0; }
+        int dropped = 0;
+        // From the end of the document towards its start: the ones still to go keep their place.
+        for (int i = whole.Count - 1; i >= 0; i--)
+        {
+            try { ((dynamic)whole[i]).Delete(); dropped++; }
+            catch (COMException error) { Trace("delete_range, removing a table: " + error.Message.Trim()); }
+        }
+        return dropped;
+    }
+
+    static void WholeTables(dynamic tables, int start, int end, List<object> whole, int depth)
+    {
+        int count = (int)tables.Count;
+        for (int i = 1; i <= count; i++)
+        {
+            dynamic table = tables[i];
+            int from = (int)table.Range.Start, to = (int)table.Range.End;
+            if (from >= start && to <= end) { whole.Add(table); continue; }
+            // Reaches beyond the range (the table the range sits in): the ones inside its cells are looked at.
+            if (depth < 8) { try { WholeTables(table.Tables, start, end, whole, depth + 1); } catch (COMException) { } }
+        }
+    }
+
     static bool Nested;   // a picture or table being put in from inside insert_paragraphs
 
     static string WordOp(dynamic doc, string type, Bag op)
@@ -2535,7 +2613,8 @@ static class Program
             IList items = op.List("items");
             if (items == null) { items = new ArrayList(); items.Add(new Dictionary<string, object> { { "text", op.Need("text") } }); }
             dynamic current = null;
-            int made = 0, equations = 0, cites = 0;
+            int made = 0, equations = 0, cites = 0, totalBefore = (int)doc.Paragraphs.Count;
+            bool tabled = false;
             string lint = "";
             Bag resume = null;
             foreach (object raw in items)
@@ -2575,6 +2654,7 @@ static class Program
                     resume = new Bag(next);
                     current = null;
                     made++;
+                    tabled = true;
                     continue;
                 }
                 foreach (string text in Lines(item.Raw("text") ?? "").Split('\r'))
@@ -2605,8 +2685,12 @@ static class Program
             }
             // The batch may end on a picture or a table: then there is no last paragraph of text to count from.
             if (current == null) return "inserted " + made + " item(s), " + (int)doc.Paragraphs.Count + " paragraphs now" + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint + SmallNote();
-            int lastIndex = Index(doc, current);
-            return "inserted " + made + " paragraph(s), now paragraphs " + (lastIndex - made + 1) + "–" + lastIndex + " of " + (int)doc.Paragraphs.Count + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint + SmallNote();
+            int lastIndex = Index(doc, current), totalNow = (int)doc.Paragraphs.Count;
+            // A table among the items is many paragraphs (one per cell and one per row): the run is counted by what
+            // the document grew by, not by the number of items.
+            int grown = Math.Max(made, totalNow - totalBefore);
+            int firstIndex = Math.Max(1, lastIndex - (tabled ? grown : made) + 1);
+            return "inserted " + made + (tabled ? " item(s)" : " paragraph(s)") + ", now paragraphs " + firstIndex + "–" + lastIndex + " of " + totalNow + (equations > 0 ? ", " + equations + " equation(s)" : "") + (cites > 0 ? ", " + cites + " citation(s)" : "") + MathNote() + lint + SmallNote();
         }
         if ((type == "set_text" || (type == "delete_range" && op.Has("para"))) && op.Raw("expect") == null)
         {
@@ -2634,16 +2718,37 @@ static class Program
             if (!op.Has("para") && !op.Has("find")) throw new Fail("BAD_ARGS", "Say what to delete with \"para\" (and \"to\") or \"find\".");
             dynamic gone = WordRange(doc, op);
             string note = "";
-            try { gone.Delete(); }
+            // Word, asked to delete a range that is exactly a table (or ends on one), empties the cells and leaves the
+            // grid standing; inside a cell of another table it refuses outright. A table that lies wholly within the
+            // paragraphs named is taken out as a table first, and the text around it after that.
+            int dropped = op.Has("find") ? 0 : DropTables(gone);
+            if (dropped > 0)
+            {
+                note = " (" + dropped + " table(s) removed with it)";
+                if ((int)gone.End <= (int)gone.Start) return "deleted, " + (int)doc.Paragraphs.Count + " paragraphs now" + note;
+            }
+            int countBefore = (int)doc.Paragraphs.Count;
+            bool several = op.Has("to") && op.Int("to", 0) > op.Int("para", 0), cells = false;
+            try { cells = several && !op.Has("find") && Truthy(gone.Information[12]); } catch (Exception) { }
+            try
+            {
+                gone.Delete();
+                // Paragraphs that are cells of a table lose their text and stay: said, so that it is not taken for done.
+                if (cells && (int)doc.Paragraphs.Count == countBefore) note += " — NOTE no paragraph went: these are cells of a table, Word emptied them and the table still stands. To remove a table, give its full run of paragraphs, first to last, as office_read lists it";
+            }
             catch (COMException)
             {
                 // The mark that ends a table cell cannot be deleted: take everything before it.
                 int limit = (int)gone.End - 1;
                 try { int from = (int)gone.Start; limit = Math.Min(limit, (int)doc.Range(from, from).Cells[1].Range.End - 1); } catch (Exception) { }
                 gone.End = limit;
-                if ((int)gone.End <= (int)gone.Start) throw new Fail("BAD_ARGS", "This is the last paragraph of a table cell; a cell always keeps one. Leave it empty.");
+                if ((int)gone.End <= (int)gone.Start)
+                {
+                    if (dropped > 0) return "deleted, " + (int)doc.Paragraphs.Count + " paragraphs now" + note;
+                    throw new Fail("BAD_ARGS", "This is the last paragraph of a table cell; a cell always keeps one. Leave it empty. To remove a whole table, give delete_range the table's full run of paragraphs, first to last, as office_read lists it.");
+                }
                 gone.Delete();
-                note = " (the last paragraph of the cell stays, a cell always keeps one)";
+                note += " (the last paragraph of the cell stays, a cell always keeps one)";
             }
             return "deleted, " + (int)doc.Paragraphs.Count + " paragraphs now" + note;
         }

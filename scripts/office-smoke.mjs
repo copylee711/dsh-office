@@ -98,6 +98,25 @@ if (apps.includes('word')) {
   check('word table', table.cells[1][1] === '30' && table.cells[2][0] === '梨', JSON.stringify(table.cells))
   const mismatch = await call('edit', { doc: path, ops: [{ op: 'set_text', para: 3, expect: '不是这段', text: 'x' }, { op: 'replace_text', find: '乙方', replace: '丙方' }] })
   check('word anchor mismatch stops the batch', mismatch.failed?.code === 'ANCHOR_MISMATCH' && mismatch.done.length === 0, mismatch.failed?.error)
+  // A function name in a subscript (min, max): Word used to take the text right after such an equation.
+  const tail = (await call('read', { doc: path })).paragraphs
+  await edit('word', path, [{ op: 'insert_paragraphs', where: 'end', items: [{ text: '极小周期 $T_{min}=1.2002$ s，出现在 $x_{max}$ 处。' }, { text: '$$T_{min}=2\\pi\\sqrt{\\frac{2R_G}{g}} \\tag{1}$$' }, { text: '公式后的一段。' }] }])
+  read = await call('read', { doc: path, from: tail + 1, full: true })
+  check('word text after a formula is kept', read.paragraphs === tail + 3 && /1\.2002 s，出现在/.test(read.items[0]?.text ?? '') && /处。$/.test(read.items[0]?.text ?? '') && read.items[2]?.text === '公式后的一段。', read.items.map(i => i.text).join(' / '))
+  // A table inside a cell of another table: read by its own numbers, and removed as a table by delete_range.
+  await edit('word', path, [{ op: 'insert_table', where: 'end', rows: 1, cols: 1 }])
+  const frame = (await call('read', { doc: path })).items.findLast(i => i.size === '1x1')
+  await edit('word', path, [
+    { op: 'set_text', para: frame.i, expect: '', text: '框内标题\n框内结尾' },
+    { op: 'insert_paragraphs', para: frame.i, expect: '框内标题', where: 'after', items: [{ text: '表前说明' }, { data: [['a', 'b'], ['1', '2']] }, { text: '表后说明' }] },
+  ])
+  read = await call('read', { doc: path, from: frame.i })
+  const inner = read.items.find(i => i.size === '2x2')
+  const midway = (await call('read', { doc: path, from: inner.i + 2, count: 3 })).items[0]
+  check('word nested table numbered', inner.to - inner.i === 5 && midway?.i === inner.i && midway?.to === inner.to, `${inner.i}–${inner.to}, read from inside it: ${midway?.i}–${midway?.to}`)
+  const removed = await edit('word', path, [{ op: 'delete_range', para: inner.i, expect: 'a', to: inner.to }])
+  read = await call('read', { doc: path, from: frame.i })
+  check('word nested table removed whole', /1 table\(s\) removed/.test(removed.done[0] ?? '') && !read.items.some(i => i.size === '2x2') && read.items.some(i => i.text === '表后说明'), removed.done[0])
   const shot = await call('render', { doc: path, page: 1, out: join(dir, 'word.png') })
   check('word render', statSync(shot.path).size > 3000, `${shot.width}×${shot.height} ${shot.what}`)
   const pdf = await call('save', { doc: path, path: join(dir, 'smoke.pdf') })
