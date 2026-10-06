@@ -3,10 +3,13 @@ export const FILE_SKILLS: Record<string, 'word' | 'excel' | 'ppt'> = { 'office-d
 
 const APPS = { word: 'Microsoft Word', excel: 'Microsoft Excel', ppt: 'Microsoft PowerPoint' } as const
 
-/** What the model is told the first time it reaches for one of those skills. */
+/**
+ * What the model reads the first time it loads one of those skills: this plugin's own short skill in its place, as
+ * the result of the call (not a refusal: nothing went wrong, and the user should not see an error).
+ */
 export function redirectText(skill: string, app: 'word' | 'excel' | 'ppt'): string {
   return [
-    `Not loaded: ${APPS[app]} is installed on this computer, so do this work inside it with the office_ tools instead of building the file with a script.`,
+    `Skill ${skill} on this computer: ${APPS[app]} (or WPS Office) is installed, so this work is done inside the app itself with the office_ tools, not by building the file with a script.`,
     'Call office_open with the absolute path (a path that does not exist yet creates the document; the app is started for you if it is not running), then office_read, office_edit, office_render, office_save. The user watches the document take shape in the window and can edit alongside; formulas, captions and layout are done by the app itself.',
     `Only if the task truly cannot be done that way (converting many files in bulk, a file the app cannot open, no document to show), call skill "${skill}" again and it will load.`,
   ].join('\n')
