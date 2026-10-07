@@ -6,6 +6,14 @@
 
 仅支持 Windows，需要本机装有微软 Office 或 WPS Office。
 
+![AI 在 Word 窗口里写一份通知：标题、导语、表格逐步出现](assets/demo-word.gif)
+
+上图是一次真实操作的录屏（只录了 Word 窗口）：AI 按要求写出标题、导语和表格，随后检查排版并修正。下图是对话里的交付结果，以及设置页。
+
+| 对话与交付的文件 | 设置页 |
+|---|---|
+| ![对话：AI 说明文档结构并交付 读书会通知.docx](assets/chat.png) | ![设置 → Office：应用状态、办公套件、行为开关](assets/settings.png) |
+
 ## 功能
 
 | 功能 | 说明 |
