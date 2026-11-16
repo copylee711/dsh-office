@@ -13,7 +13,9 @@ const MARKER = 'data-dsh-office-settings-nav'
 const ICON_SVG = "%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/%3E%3Cpath d='M14 2v4a2 2 0 0 0 2 2h4'/%3E%3Cpath d='M10 9H8'/%3E%3Cpath d='M16 13H8'/%3E%3Cpath d='M16 17H8'/%3E%3C/svg%3E"
 
 export const navIconCss = `
-[${MARKER}] > svg:first-child { display: none; }
+/* Older shells render the SVG directly; newer shells wrap it in a decorative span. */
+[${MARKER}] > svg:first-child,
+[${MARKER}] > span[aria-hidden="true"]:first-child { display: none; }
 [${MARKER}]::before {
   content: '';
   flex: none;
