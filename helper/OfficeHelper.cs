@@ -1668,6 +1668,43 @@ static class Program
             + paragraph + "</w:p></w:body></w:document></pkg:xmlData></pkg:part></pkg:package>";
     }
 
+    /// Whether the Word object model at hand is WPS Writer: picked as the WPS suite, or WPS answering to
+    /// Word.Application (its Build is 12.1.x and its name says WPS, while Microsoft Word is 14.0 and up).
+    static bool IsWpsWriter(dynamic doc)
+    {
+        if (Suite == "wps") return true;
+        try
+        {
+            dynamic app = doc.Application;
+            string name = Convert.ToString(app.Name) ?? "";
+            if (name.IndexOf("WPS", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            string build = Convert.ToString(app.Build) ?? "";
+            if (build.StartsWith("12.1.", StringComparison.Ordinal)) return true;
+        }
+        catch (Exception) { }
+        return false;
+    }
+
+    /// The table has the rows and columns it was made with.
+    static bool Shaped(dynamic table, int rows, int cols)
+    {
+        try { return (int)table.Rows.Count == rows && (int)table.Columns.Count == cols; }
+        catch (Exception) { return false; }
+    }
+
+    /// Replace a collapsed table with a new one at the same place, every argument of Tables.Add spelt out
+    /// (default table behaviour, fixed widths). A table that still comes out wrong is removed, not left behind.
+    static dynamic Rebuild(dynamic doc, dynamic table, int at, int rows, int cols)
+    {
+        try { table.Delete(); } catch (Exception) { }
+        dynamic again = doc.Tables.Add(doc.Range(at, at), rows, cols, 1, 0);
+        if (Shaped(again, rows, cols)) return again;
+        try { again.Delete(); } catch (Exception) { }
+        throw new Fail("TABLE_COLLAPSED", "This Word build made a " + rows + "×" + cols + " table come out as "
+            + "a different shape, so nothing was inserted. If WPS Office is installed and answers to Word.Application, "
+            + "pick WPS as the office suite in the plugin's settings (or pass suite: \"wps\") and try again.");
+    }
+
     /// One formula of a WPS document: the text between the dollar signs gives way to the equation.
     static bool WpsMath(dynamic doc, dynamic range, int start, System.Text.RegularExpressions.Match m)
     {
@@ -3153,10 +3190,17 @@ static class Program
                     string style = item.Str("style", op.Str("style", null));
                     if (style != null) Plain(p, style);
                     else Body(p);
+                    string styled = null;
+                    if (style != null) { try { styled = (string)p.Style.NameLocal; } catch (Exception) { } }
                     WordFormat(p.Range, StyleLess(op));
                     WordFormat(p.Range, StyleLess(item));
                     Follow(doc, p.Range);
                     Write(doc, (int)p.Range.Start, text);
+                    // WPS can drop a style set on the empty paragraph once text goes in (dsh-office#3): put it back.
+                    if (styled != null)
+                    {
+                        try { if ((string)p.Style.NameLocal != styled) SetStyle(p.Range, style); } catch (Exception) { }
+                    }
                     if (lint.Length == 0) lint = Lint(text);
                     Unnumber(p, text);
                     try
@@ -3273,33 +3317,55 @@ static class Program
             Plain(p, "Normal");
             Follow(doc, p.Range);
             string cellLint = "";
+            int tableAt = (int)p.Range.Start;
+            bool wpsWriter = IsWpsWriter(doc);
             dynamic table = doc.Tables.Add(p.Range, rows, cols);
-            // The cells take the formatting of the paragraph that follows (a heading, say): make them plain.
-            SetStyle(table.Range, "Normal");
+            // WPS 12.1 can answer to Word.Application too, and some of its builds hand back (or later collapse) a
+            // 1×0 table: issue copylee711/dsh-office#3. Check the shape and rebuild with every argument spelt out.
+            if (!Shaped(table, rows, cols)) table = Rebuild(doc, table, tableAt, rows, cols);
+            bool fullFormat = true;
             try
             {
-                table.Range.Font.Reset(); Unformat(table.Range);
-                table.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; table.Range.ParagraphFormat.FirstLineIndent = 0;
+                if (!wpsWriter)
+                {
+                    // The cells take the formatting of the paragraph that follows (a heading, say): make them plain.
+                    SetStyle(table.Range, "Normal");
+                    try
+                    {
+                        table.Range.Font.Reset(); Unformat(table.Range);
+                        table.Range.ParagraphFormat.CharacterUnitFirstLineIndent = 0; table.Range.ParagraphFormat.FirstLineIndent = 0;
+                    }
+                    catch (COMException) { }
+                }
+                try
+                {
+                    // Same typeface and size as the body text the table sits in; cells centred like a data table.
+                    if (!string.IsNullOrEmpty(fontName)) table.Range.Font.Name = fontName;
+                    if (!string.IsNullOrEmpty(fontFarEast)) table.Range.Font.NameFarEast = fontFarEast;
+                    if (fontSize > 4 && fontSize < 100) table.Range.Font.Size = fontSize;
+                    table.Range.ParagraphFormat.Alignment = 1;
+                    if (!wpsWriter) Whole(table.Range);
+                }
+                catch (COMException) { }
+                try { table.Range.Cells.VerticalAlignment = 1; }
+                catch (Exception)
+                {
+                    // WPS: cell by cell.
+                    try { for (int r = 1; r <= rows; r++) for (int c = 1; c <= cols; c++) table.Cell(r, c).VerticalAlignment = 1; } catch (Exception) { }
+                }
+                Rules(table, op.Str("borders", "grid"));
+                if (!wpsWriter) { try { table.AutoFitBehavior(2); } catch (COMException) { } }
             }
-            catch (COMException) { }
-            try
-            {
-                // Same typeface and size as the body text the table sits in; cells centred like a data table.
-                if (!string.IsNullOrEmpty(fontName)) table.Range.Font.Name = fontName;
-                if (!string.IsNullOrEmpty(fontFarEast)) table.Range.Font.NameFarEast = fontFarEast;
-                if (fontSize > 4 && fontSize < 100) table.Range.Font.Size = fontSize;
-                table.Range.ParagraphFormat.Alignment = 1;
-                Whole(table.Range);
-            }
-            catch (COMException) { }
-            try { table.Range.Cells.VerticalAlignment = 1; }
             catch (Exception)
             {
-                // WPS: cell by cell.
-                try { for (int r = 1; r <= rows; r++) for (int c = 1; c <= cols; c++) table.Cell(r, c).VerticalAlignment = 1; } catch (Exception) { }
+                if (Shaped(table, rows, cols)) throw;
             }
-            Rules(table, op.Str("borders", "grid"));
-            try { table.AutoFitBehavior(2); } catch (COMException) { }
+            // Formatting that flattened the table is not worth keeping: start again with a plain one.
+            if (!Shaped(table, rows, cols))
+            {
+                table = Rebuild(doc, table, tableAt, rows, cols);
+                fullFormat = false;
+            }
             if (data != null)
             {
                 for (int r = 0; r < data.Count && r < rows; r++)
@@ -3336,7 +3402,8 @@ static class Program
             int tableEnd = (int)doc.Range(0, table.Range.End).Paragraphs.Count;
             bool nested = false;
             try { nested = (int)table.NestingLevel > 1; } catch (Exception) { }
-            return (nested ? "table inserted inside a cell of table " + (int)doc.Range(0, table.Range.End).Tables.Count : "table " + (int)doc.Range(0, table.Range.End).Tables.Count + " inserted") + " (" + rows + "×" + cols + "), now paragraphs " + (tableEnd - (int)table.Range.Paragraphs.Count + 1) + "–" + tableEnd + " of " + (int)doc.Paragraphs.Count + cellLint;
+            return (nested ? "table inserted inside a cell of table " + (int)doc.Range(0, table.Range.End).Tables.Count : "table " + (int)doc.Range(0, table.Range.End).Tables.Count + " inserted") + " (" + rows + "×" + cols + "), now paragraphs " + (tableEnd - (int)table.Range.Paragraphs.Count + 1) + "–" + tableEnd + " of " + (int)doc.Paragraphs.Count + cellLint
+                + (fullFormat ? "" : " (formatting the table made this Word/WPS build collapse it, so it was rebuilt plain: apply a style with format_table)");
         }
         if (type == "set_cell")
         {
